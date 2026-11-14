@@ -19,14 +19,18 @@ export async function requestApprovalFromMcpClient(
 	const params = buildApprovalElicitationParams(request);
 	if (!params) return "cancel";
 	const options: RequestOptions | undefined = signal ? { signal } : undefined;
+	if (signal?.aborted) return "cancel";
+	let response;
 	try {
-		const response = await client.elicitInput(params, options);
-		if (response.action === "decline") return "decline";
-		if (response.action !== "accept") return "cancel";
-		const content = response.content;
-		if (!content || typeof content !== "object" || Array.isArray(content)) return "decline";
-		return (content as Record<string, unknown>).approve === true ? "accept" : "decline";
-	} catch {
-		return "cancel";
+		response = await client.elicitInput(params, options);
+	} catch (error) {
+		if (signal?.aborted) return "cancel";
+		throw error;
 	}
+	if (signal?.aborted) return "cancel";
+	if (response.action === "decline") return "decline";
+	if (response.action !== "accept") return "cancel";
+	const content = response.content;
+	if (!content || typeof content !== "object" || Array.isArray(content)) return "decline";
+	return (content as Record<string, unknown>).approve === true ? "accept" : "decline";
 }

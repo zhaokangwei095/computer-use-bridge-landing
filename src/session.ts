@@ -5,12 +5,14 @@ import { appendAudit, type AuditRecord } from "./audit.ts";
 import { configPath, defaultStateRoot, loadConfig, type AppConfig } from "./config.ts";
 import { discoverInstallation, type Installation } from "./discovery.ts";
 import { CuaError, errorMessage } from "./errors.ts";
+import { serializeError } from "./error-envelope.ts";
 import { HelperClient } from "./helper-client.ts";
 import { JsKernel, type JsRunResult } from "./js-kernel.ts";
 import type { ApprovalDecision } from "./approval.ts";
 import { Sky } from "./sky.ts";
 import { CUA_REPL_TOOLS, type CuaReplTool, type JsonObject } from "./tools.ts";
 import { PACKAGE_VERSION } from "./version.ts";
+import { desktopToolDefinitions } from "./desktop-tools.ts";
 
 export type ContentBlock = {
 	type: "text";
@@ -41,7 +43,7 @@ interface StatusShape {
 	configPath: string;
 	permissionMode: "helper-approval";
 	approval: AppConfig["approval"];
-	tools: CuaReplTool[];
+	tools: string[];
 	ready: boolean;
 	error: string | null;
 	helperRunning: boolean;
@@ -161,6 +163,7 @@ export class ComputerUseSession {
 				timeoutMs: config.helperTimeoutMs,
 				approval: this.approval,
 				logger: this.logger,
+				onExit: () => this.sky?.invalidateObservations(true),
 			});
 		}
 		if (!this.sky) {
@@ -221,7 +224,7 @@ export class ComputerUseSession {
 		try {
 			config = await this.ensureConfig();
 		} catch (error) {
-			return { isError: true, content: [{ type: "text", text: errorMessage(error) }] };
+			return { isError: true, content: [{ type: "text", text: errorMessage(error) }], structuredContent: { error: serializeError(error, { action_sent: "not_sent" }) } };
 		}
 		this.activeRuns += 1;
 		this.touchIdle(config);
@@ -297,9 +300,10 @@ export class ComputerUseSession {
 				resultContentTypes: ["text"],
 				errorCode: errorCode(error),
 			});
-			return { isError: true, content: [{ type: "text", text: errorMessage(error) }] };
+			return { isError: true, content: [{ type: "text", text: errorMessage(error) }], structuredContent: { error: serializeError(error, { action_sent: "not_sent" }) } };
 		}
 		const result = await runtime.kernel.run(code, timeoutMs, options.signal);
+		const failure = result.ok ? null : result.errorInfo ?? serializeError(result.error ?? "Execution failed");
 		const content: ContentBlock[] = [];
 		for (const text of result.output.text) {
 			if (text) content.push({ type: "text", text });
@@ -308,19 +312,23 @@ export class ComputerUseSession {
 			const block = imageBlock(image);
 			if (block) content.push(block);
 		}
+		if (result.imageReport?.omitted) {
+			content.push({ type: "text", text: `Images omitted: ${result.imageReport.omitted}; returned: ${result.imageReport.returned}. Reasons: ${JSON.stringify(result.imageReport.reasons)}. Use text observation or a smaller capture; see imageReport for limits.` });
+		}
 		if (!result.ok) {
 			if (content.length === 0) content.push({ type: "text", text: result.error ?? "Computer Use JavaScript execution failed" });
 			else content.push({ type: "text", text: `Computer Use error: ${result.error ?? "JavaScript execution failed"}` });
 		} else if (content.length === 0) {
 			content.push({ type: "text", text: "Completed." });
 		}
+		if (failure) content.push({ type: "text", text: JSON.stringify({ error: failure, actions: result.actions ?? [] }) });
 		const outcome: AuditRecord["outcome"] = result.ok
 			? "ok"
 			: result.timedOut
 				? "timeout"
 				: result.aborted
 					? "cancelled"
-					: result.error?.includes("approval") || result.error?.includes("approved")
+					: failure?.code === "APPROVAL_DENIED" || failure?.code === "APP_BLOCKED"
 						? "approval_denied"
 						: "tool_error";
 		await this.audit({
@@ -332,13 +340,21 @@ export class ComputerUseSession {
 			durationMs: Date.now() - started,
 			helperVersion: this.installation?.helperSignature?.version || null,
 			resultContentTypes: [...new Set(content.map((block) => block.type))].sort(),
-			errorCode: result.ok ? null : result.timedOut ? "JS_TIMEOUT" : "JS_ERROR",
+			errorCode: failure?.code ?? null,
+			actionSent: failure?.action_sent,
+			retry: failure?.retry,
+			sessionReset: failure?.session_reset,
+			imagesOmitted: result.imageReport?.omitted ?? 0,
 		});
 		return {
 			isError: !result.ok,
 			content,
 			structuredContent: {
 				ok: result.ok,
+				error: failure,
+				imageReport: result.imageReport ?? null,
+				actions: result.actions ?? [],
+				actionsTruncated: result.actionsTruncated ?? false,
 				durationMs: result.durationMs,
 				outputBytes: outputBytes(result),
 				contentTypes: [...new Set(content.map((block) => block.type))].sort(),
@@ -355,7 +371,7 @@ export class ComputerUseSession {
 			configPath: configPath(this.stateRoot),
 			permissionMode: "helper-approval",
 			approval: this.config?.approval ?? "auto",
-			tools: [...CUA_REPL_TOOLS],
+			tools: [...CUA_REPL_TOOLS, "computer_use_status", ...desktopToolDefinitions().map(tool => tool.name)],
 			ready: false,
 			error: null,
 			helperRunning: this.helper?.isRunning ?? false,

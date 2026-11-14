@@ -72,7 +72,7 @@ export const CUA_TOOL_DEFINITIONS: ToolDefinition[] = [
 	{
 		name: "js_reset",
 		title: "Computer Use reset",
-		description: "Reset the persistent Computer Use JavaScript session. All JavaScript bindings are discarded. The helper's per-app approval cache may survive.",
+		description: "Reset the persistent Computer Use JavaScript session, abort the helper, and cancel queued helper requests. Already dispatched actions may have taken effect and are not undone. All JavaScript bindings are discarded; the server's per-app approval cache survives.",
 		inputSchema: {
 			type: "object",
 			properties: {},
@@ -95,6 +95,10 @@ export const STATUS_TOOL_DEFINITION: ToolDefinition = {
 };
 
 export const SERVER_INSTRUCTIONS = `This server controls native Windows applications through OpenAI's signed Computer Use helper. It uses UI Automation, SendInput, and Windows Graphics Capture on the real foreground desktop: the user sees every click, key, and scroll.
+
+For ordinary tasks use list_windows, observe_window (text first; optional screenshot/find/max_chars), click_element, and set_value. Element actions require the window, snapshot_id, session_epoch and element_index from the latest observation. Any observation or mutation conservatively invalidates older structured references; js_reset and helper restart also invalidate them. observe_after defaults to true. A sent action is distinct from successful follow-up observation. These refs do not guarantee the UI did not change externally. Use js for batches; its low-level sky methods retain their existing semantics.
+
+For browser URLs and tabs, use the separately configured node_repl MCP with the official Browser Service. In a fresh worker, after CUA_REPL_ENABLED_SURFACES=browser is exposed through nodeRepl.env, run await import("@oai/cua/tinyskyAlt") and use cua.getState()/cua.listTabs() plus cua.getTab()/cua.createBrowserTab(). If the service denies access because the host lacks authorized session context, stop; do not fabricate context or infer URLs from screenshots or window titles. This browser session is separate from this server's JavaScript session.
 
 The tools run JavaScript in a persistent worker with a vm guardrail (Node APIs are blocked, but this is not a security boundary for untrusted code). The globals are:
 - sky: OpenAI's Windows Computer Use API.
@@ -142,6 +146,8 @@ Safety rules enforced by this server:
 - In the default "auto" approval mode, apps that are not on the deny list can be controlled without a separate prompt. The user can switch to "mcp" or "deny" in config.json.
 
 Execution:
+- Failed runs include structuredContent.error (code, retry, action_sent, session_reset). possibly_sent means the mutation may already have happened: re-observe, never replay blindly. User cancellation means stop. Earlier mutation statuses appear in structuredContent.actions.
+- imageReport reports image omissions and budgets. Screenshot data URLs remain usable inside JavaScript but are suppressed in displayed text; use image content for pixels.
 - 'js' defaults to a 30 second timeout. A timed-out execution terminates the worker and loses its bindings. Its outcome is unknown; re-observe before retrying any action.
 - Use short polls rather than one long sleep. 'js_reset' clears bindings.
 - Errors are returned as tool errors with the helper's message. If discovery or authentication fails, run 'computer_use_status' and show the user the recovery hint.`;

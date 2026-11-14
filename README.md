@@ -116,6 +116,54 @@ Restart the client after changing the configuration.
 
 ## Tools
 
+### Structured desktop tools (preview)
+
+`list_windows` lists windows. `observe_window` accepts a `window` descriptor
+and defaults to accessibility text without a screenshot. Optional `find`
+filters lines, `max_chars` limits returned characters (256–200000, default
+24000), and `screenshot: true` requests an image. A missing accessibility
+tree is reported explicitly; screenshot capture is not retried automatically.
+
+`click_element` and `set_value` require `window`, `snapshot_id`,
+`session_epoch`, and `element_index` from the latest observation. `set_value`
+also requires `value`. `observe_after` defaults to true. Results distinguish
+`action.action_sent` from `observation.status`; a successful action followed
+by failed observation must not be replayed. `verified: false` means the bridge
+has not determined whether the user's intended UI change occurred.
+
+Any observation or mutation conservatively invalidates all earlier structured
+references in the server. `js_reset`, idle abort, and helper exit invalidate
+them too. These are observation-local indices, not stable element identities.
+External UI changes remain subject to the helper's own checks. Low-level
+`sky` methods retain their existing behavior. Structured calls run through
+the same serialized JS kernel, approvals, budgets and audit path.
+
+The structured tools are a preview pending real DSH/Qoder and mixed-DPI
+acceptance. They do not add browser tab control, screenshot coordinate
+transforms, automatic tree diffs, or cross-process desktop locking.
+
+### Configuration and diagnostics
+
+```powershell
+node dist\mcp-server.js print-config --client qoder
+node dist\mcp-server.js print-config --client dsh
+node dist\mcp-server.js doctor
+node dist\mcp-server.js doctor --live
+```
+
+Configuration commands print merge fragments and never edit client files.
+The DSH fragment is JSON (also valid YAML); merge the entry into the existing
+Cordis patch rather than appending a second top-level document or duplicating
+the server. Other clients can use `--client generic`.
+
+`doctor` checks discovery and reports the tool catalog without starting the
+native helper or proving a client MCP handshake. `doctor --live` additionally
+starts the real helper and reports only a window count, then closes it. It
+does not click, type, capture, verify application approval, or certify an
+interactive client. Real helper startup can maintain Codex state as described
+under Privacy. Client handshake, rendering, app authorization, and end-to-end
+tasks remain separate checks.
+
 ### `js`
 
 Runs JavaScript in a persistent worker thread with a `vm` guardrail. Top-level
@@ -185,12 +233,53 @@ await app.pressKey("Return");
 
 `app.getAXState({ screenshot: false })` avoids capture. `cua.listTabs()` and
 `cua.createBrowserTab()` explicitly report that browser tab control is not
-available on Windows.
+available in this Windows adapter.
+
+For browser work in DSH, run the official `node_repl` Browser Service as a
+separate MCP in the same agent session. Keep `NODE_REPL_TRUSTED_SERVICES` mapped
+to `@oai/browser-desktop/service` and `@oai/sky/service`, with
+`NODE_REPL_NODE_MODULE_DIRS` and `NODE_REPL_NODE_PATH` aligned to the same
+installed `cua_node` runtime. To expose the documented browser surface, allow
+`CUA_REPL_ENABLED_SURFACES=browser` through `nodeRepl.env`, then run
+`await import("@oai/cua/tinyskyAlt")` once in each fresh worker. Use
+`cua.getState()` / `cua.listTabs()` to inspect inventory, then
+`cua.getTab()` / `cua.createBrowserTab()` for browser tabs and URLs; verify with
+`tab.url()`. Hosts that inject `agent` also expose the underlying
+`agent.browsers` and `browser.tabs` APIs. The Browser Service still requires the
+authorized host session context; if DSH cannot provide it and inventory access is
+denied, do not fabricate context or infer URLs from UI. Reload the DSH MCP
+configuration after environment changes. The browser service has its own URL/tab
+context and JavaScript session, separate from this Windows helper's `js` session.
+
+### Execution results and output budgets
+
+Failed executions include a machine-readable `structuredContent.error` with
+`code`, `message`, `method` when known, `retry`, `action_sent`,
+`session_reset`, and `side_effect`. `retry: reobserve` means inspect the
+application again before planning another action; it never authorizes replay.
+A dispatched mutation that times out is `possibly_sent`. An application
+blocked before dispatch is `not_sent`. A successful helper response is `sent`,
+which does not prove the requested visible UI change occurred.
+
+`structuredContent.actions` records up to 128 mutation methods and statuses
+for the execution, including completed earlier actions when a later operation
+fails. `actionsTruncated` reports overflow. User cancellation is `retry: never`.
+Errors caught inside JavaScript retain primitive metadata properties such as
+`error.code`; an intentionally caught error does not fail the whole execution.
+
+Screenshots remain available as data URLs inside JavaScript for compatibility
+with `sky` and `cua`. Image data URLs are removed from displayed text output;
+use `nodeRepl.emitImage` to emit images. `imageReport` contains requested,
+returned, omitted and duplicate counts, returned bytes, omission reasons and
+kernel limits. Sky-layer omissions retain their own configuration limits.
+Image omissions also produce a text notice for clients that ignore structured
+results. Text observations can succeed even when no image fits the budget.
 
 ### `js_reset`
 
-Discards all JavaScript bindings and terminates the worker. The helper process
-and its per-app approval cache may survive.
+Discards all JavaScript bindings, terminates the worker, aborts the helper, and
+cancels queued helper requests. Already dispatched actions may have taken effect;
+a reset cannot undo them. The server's per-app approval cache survives.
 
 ### `computer_use_status`
 
@@ -222,8 +311,8 @@ with `CODEX_COMPUTER_USE_HOME`. The file is `<state>\config.json`:
 | `approval` | `"auto"` | `auto`: approve apps not on the deny list. `mcp`: ask the MCP client. `deny`: refuse all app approvals. |
 | `elicitationFallback` | `"auto"` | Used by `mcp` mode when the client cannot show an approval form. `auto` fails open; `deny` fails closed. |
 | `verifySignatures` | `true` | Require valid Authenticode signatures from OpenAI for the helper and Codex CLI. |
-| `denyApps` | `[]` | Extra app patterns. Combined with the built-in deny list. |
-| `allowApps` | `[]` | If non-empty, only these app patterns are allowed. Deny always wins. |
+| `denyApps` | `[]` | Extra app patterns. Combined with the built-in deny list. `*` is a wildcard. |
+| `allowApps` | `[]` | Apps that are approved without a prompt. A full path covers only that location; a bare name or app id covers every location of that identity. Add `*` for a broader pattern. Deny always wins, and apps not listed still follow `approval`. |
 | `maxScreenshotBytes` | 8 MiB | Per-screenshot cap after base64 decoding. Larger screenshots are omitted with `urlOmitted`. |
 | `maxTextBytes` | 2 MiB | Cap for accessibility text returned by one call. |
 | `helperTimeoutMs` | 60 s | Timeout for one helper request. |
@@ -235,9 +324,32 @@ with `CODEX_COMPUTER_USE_HOME`. The file is `<state>\config.json`:
 
 The built-in deny list covers terminals/shells, the ChatGPT/Codex control plane,
 password managers, Windows security and administration surfaces, UAC/secure
-desktop, and remote-control tools. Matching strips `process:`, lowercases,
-compares full paths, basenames, and executable stems, and treats display names
-as untrusted hints. See [SECURITY.md](SECURITY.md) before relying on it.
+desktop, and remote-control tools. Deny matching strips `process:`, lowercases,
+and compares full paths, basenames, and executable stems exactly; only a pattern
+containing `*` is treated as a glob. Display names are untrusted hints. Allow
+matching strips `process:` and compares exact normalized paths, executable
+basenames, or app ids; a full path does not cover the same name elsewhere, and
+display names never satisfy it. Unknown configuration keys are rejected with the
+supported key names; omitted keys retain their defaults. See
+[SECURITY.md](SECURITY.md) before relying on it.
+
+### Editing the allow list
+
+`allowApps` is an "approved without a prompt" list, not a wall: anything it does
+not contain still follows `approval`. Edit it from the command line instead of
+hand-editing the state file:
+
+```powershell
+node dist\mcp-server.js allow list
+node dist\mcp-server.js allow add chrome.exe "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"
+node dist\mcp-server.js allow remove chrome.exe
+```
+
+Writes are atomic, deduplicated case-insensitively, and validated first: an
+existing invalid `config.json` is reported instead of being overwritten. Combine
+it with `approval: "mcp"` to pre-approve your everyday apps and still get a
+prompt for everything else, or with `approval: "deny"` to make the allow list the
+only way in. Restart the client after editing.
 
 ## Approval and safety
 
@@ -312,6 +424,12 @@ Common cases:
   idle timeout. Do not retry the action; re-observe the app first.
 - **Window is minimized** — call `sky.activate_window({ window })`, refresh with
   `sky.get_window({ id, app })`, then retry `get_window_state`.
+- **The helper cannot determine the current browser URL** — the official Windows
+  runtime blocks browser access when it cannot verify the URL confidently. This
+  adapter preserves that policy and does not infer the URL from a title or
+  screenshot. Use the official DSH `node_repl` Browser Service described above;
+  if it lacks authorized host session context, stop and surface that limitation
+  instead of retrying through UIA or screenshots.
 - **User input was detected** — call `get_window_state` again before acting.
 - **Accessibility is null** — some Electron apps (including VS Code in testing)
   do not expose a UIA tree. Screenshots still work; use coordinates or another

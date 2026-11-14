@@ -94,18 +94,27 @@ for the idle timeout; the port does not implement Codex turn metadata or
 
 - `approval: "deny"` refuses every app.
 - `approval: "mcp"` asks the MCP client through an elicitation form. The form
-  accepts only an explicit `approve: true`; decline, cancel, malformed output,
-  timeout, or a client without elicitation follows `elicitationFallback`
-  (`auto` or `deny`). For a fail-closed setup use
+  accepts only an explicit `approve: true`. Decline, cancel, malformed output,
+  or an aborted request is denied. Client errors, including unsupported
+  elicitation and request timeouts without cancellation, follow
+  `elicitationFallback` (`auto` or `deny`). For a fail-closed setup use
   `"approval": "mcp", "elicitationFallback": "deny"`.
 - `approval: "auto"` approves any app that is not denied. This is the
   upstream-compatible default and is convenient for trusted local automation,
   but it is not an action-level safety gate.
 - Deny checks run before prompts. Deny always wins over an allow list.
-- Matching normalizes `process:` prefixes and package suffixes, lowercases,
-  and compares full paths, basenames, executable stems, and display names.
-  Display names are untrusted and may be spoofed; the elicitation message also
-  includes the app id and risk level.
+- `allowApps` pre-approves matching apps and skips the configured mode. It is a
+  convenience shortcut, not a restriction: an app that is not listed still
+  follows `auto`, `mcp`, or `deny`. Pair it with `mcp` to prompt for everything
+  else, or with `deny` to make the list the only way in.
+- Deny matching normalizes `process:` prefixes and package suffixes, lowercases,
+  and compares full paths, basenames, executable stems, and display names
+  exactly. Only a pattern containing `*` is treated as a glob, so a bare
+  `notepad.exe` does not match `notepad-helper.exe`. Allow matching strips
+  `process:` and compares exact normalized paths, full executable basenames, or
+  complete app ids, case-insensitively. A full path does not allow the same
+  basename at another location. Display names never satisfy the allow list; the
+  elicitation message also includes the app id and risk level.
 - The built-in deny list covers terminals and shells, the ChatGPT/Codex control
   plane, password managers, Windows security and administration tools, UAC and
   secure-desktop processes, and remote-control tools. It is a floor, not a
@@ -188,8 +197,8 @@ log. Do not treat it as a tamper-proof security log.
 
 ## Hardening recommendations
 
-- Use `"approval": "mcp", "elicitationFallback": "deny"` and a narrow
-  `allowApps` list when the MCP client supports elicitation.
+- Use `"approval": "mcp", "elicitationFallback": "deny"` with a short
+  `allowApps` list of apps you already trust, so everything else prompts.
 - Keep the helper and Codex CLI updated and `verifySignatures` enabled.
 - Do not run the MCP client or this server elevated.
 - Use a dedicated Windows user or VM for sensitive automation.

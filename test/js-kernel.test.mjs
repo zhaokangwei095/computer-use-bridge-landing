@@ -4,6 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import { after, before, describe, test } from "node:test";
 import { JsKernel } from "../dist/js-kernel.js";
+import { HelperClient } from "../dist/helper-client.js";
+import { ApprovalController } from "../dist/approval.js";
+import { Sky } from "../dist/sky.js";
 
 const PNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nQAAAABJRU5ErkJggg==";
 const APP = "process:C:\\Windows\\System32\\notepad.exe";
@@ -226,7 +229,7 @@ try {
 	});
 
 	test("caps total image bytes", async () => {
-		const small = new JsKernel({ sky: new FakeSky(), maxImageBytes: 10, maxTotalImageBytes: 4 });
+		const small = new JsKernel({ sky: new FakeSky(), maxImageBytes: 10, maxTotalImageBytes: 3 });
 		try {
 			const result = await small.run(`
 nodeRepl.emitImage("data:image/png;base64,AAA=");
@@ -253,6 +256,52 @@ nodeRepl.write("done");
 });
 
 describe("sandbox lifecycle", () => {
+	test("reset cancels queued helper mutations and reports in-flight uncertainty", {timeout: 10000}, async () => {
+		const queued = Promise.withResolvers();
+		const blocked = Promise.withResolvers();
+		const sent = [];
+		const requests = [];
+		const helper = new HelperClient({
+			helperPath: "unused", codexPath: "unused", codexHome: "unused",
+			approval: new ApprovalController({mode: "auto", fallback: "deny", denyApps: [], allowApps: []}),
+		});
+		helper.sendRaw = async (method, params) => {
+			sent.push(params.element_index);
+			if (sent.length === 1) await blocked.promise;
+			return {ok: true, result: null};
+		};
+		const sky = new Sky({helper});
+		const click = sky.click.bind(sky);
+		sky.click = input => {
+			const request = click(input);
+			requests.push(request);
+			if (requests.length === 2) queued.resolve();
+			return request;
+		};
+		const kernel = new JsKernel({sky});
+		try {
+			const pending = kernel.run(`await Promise.all([1, 2].map(element_index => sky.click({window: {app: ${JSON.stringify(APP)}, id: 101}, element_index})))`);
+			await queued.promise;
+			await kernel.reset();
+			const result = await pending;
+			blocked.resolve();
+			await Promise.allSettled(requests);
+			assert.deepEqual(sent, [1]);
+			assert.equal(result.ok, false);
+			assert.equal(result.errorInfo.code, "CANCELLED");
+			assert.equal(result.errorInfo.session_reset, true);
+			assert.equal(result.errorInfo.action_sent, "possibly_sent");
+			assert.equal(result.errorInfo.retry, "never");
+			const fresh = await kernel.run(`await sky.click({window: {app: ${JSON.stringify(APP)}, id: 101}, element_index: 3})`);
+			assert.equal(fresh.ok, true, fresh.error);
+			assert.deepEqual(sent, [1, 3]);
+		} finally {
+			blocked.resolve();
+			await kernel.close();
+			await helper.close();
+		}
+	});
+
 	test("terminates an infinite loop and starts a fresh worker", async () => {
 		const sky = new FakeSky();
 		const kernel = new JsKernel({ sky, timeoutMs: 5_000 });

@@ -9,7 +9,8 @@ export type CuaErrorCode =
 	| "APP_BLOCKED"
 	| "JS_TIMEOUT"
 	| "JS_ERROR"
-	| "CONFIG_ERROR";
+	| "CONFIG_ERROR"
+	| "STALE_STATE";
 
 export class CuaError extends Error {
 	readonly code: CuaErrorCode;

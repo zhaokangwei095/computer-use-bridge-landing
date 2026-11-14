@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { after, describe, test } from "node:test";
 import { ApprovalController } from "../dist/approval.js";
 import { HelperClient, minimalHelperEnv } from "../dist/helper-client.js";
+import { serializeError } from "../dist/error-envelope.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fakeHelper = path.join(here, "fixtures", "fake-helper.mjs");
@@ -78,6 +79,40 @@ describe("minimalHelperEnv", () => {
 });
 
 describe("HelperClient protocol", () => {
+	test("reports denied mutations before helper dispatch", async () => {
+		const approval = new ApprovalController({mode: "auto", fallback: "deny", denyApps: ["notepad.exe"], allowApps: []});
+		const { client } = await makeClient({approval});
+		await assert.rejects(() => client.click({window: {app: APP, id: 101}, element_index: 1}), error => {
+			const facts = serializeError(error);
+			assert.equal(facts.action_sent, "not_sent");
+			assert.equal(facts.retry, "never");
+			return true;
+		});
+		assert.equal(client.isRunning, false);
+	});
+
+	test("marks a transmitted click timeout uncertain with no replay", async () => {
+		const { client, logPath } = await makeClient({timeoutMs: 700, env: {FAKE_HELPER_SLOW_MS: "2000", FAKE_HELPER_SLOW_METHOD: "click_element"}});
+		await client.listApps();
+		await assert.rejects(() => client.click({window: {app: APP, id: 101}, element_index: 1}), error => {
+			const facts = serializeError(error);
+			assert.equal(facts.code, "HELPER_TIMEOUT");
+			assert.equal(facts.action_sent, "possibly_sent");
+			assert.equal(facts.retry, "reobserve");
+			return true;
+		});
+		assert.equal((await readLog(logPath)).filter(record => record.method === "click_element").length, 1);
+	});
+
+	test("reports approval refusal as a mutation that did not execute", async () => {
+		const approval = new ApprovalController({mode: "deny", fallback: "deny", denyApps: [], allowApps: []});
+		const { client } = await makeClient({approval, env: {FAKE_HELPER_APPROVAL: "1", FAKE_HELPER_APPROVAL_METHOD: "click_element"}});
+		await assert.rejects(() => client.click({window: {app: APP, id: 101}, element_index: 1}), error => {
+			assert.equal(serializeError(error).code, "APPROVAL_DENIED");
+			assert.equal(serializeError(error).action_sent, "not_sent");
+			return true;
+		});
+	});
 	test("spawns with a sanitized environment and speaks JSONL", async () => {
 		const previousSecret = process.env.CUA_TEST_SECRET;
 		process.env.CUA_TEST_SECRET = "must-not-leak";
@@ -165,6 +200,17 @@ describe("HelperClient protocol", () => {
 		assert.equal(element.params.click_count, 2);
 		assert.equal(coordinate.params.x, 10);
 		assert.equal(coordinate.params.y, 20);
+	});
+
+	test("explains when the official helper blocks unverifiable browser URLs", async () => {
+		const { client } = await makeClient({ env: { FAKE_HELPER_BROWSER_URL_FAILURE: "1" } });
+		await assert.rejects(
+			() => client.getWindowState({
+				window: { app: "MSEdge", id: 303, title: "Microsoft Edge" },
+				include_screenshot: true,
+			}),
+			(error) => error.code === "HELPER_ERROR" && /official Windows helper.*official node_repl Browser Service/.test(error.message),
+		);
 	});
 
 	test("adds a recovery hint for minimized windows", async () => {

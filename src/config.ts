@@ -1,4 +1,5 @@
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
@@ -19,7 +20,7 @@ export const DEFAULT_DENY_APPS = [
 	"debian.exe", "kali.exe", "mintty.exe", "cygwin.exe",
 	// The Computer Use control plane itself. Driving it can recurse or loop.
 	"chatgpt.exe", "codex.exe", "codex-computer-use.exe", "cua-driver.exe",
-	"cua-driver-uia.exe", "openai.codex",
+	"cua-driver-uia.exe", "openai.codex*",
 	// Credential stores.
 	"1password.exe", "1password7.exe", "keepass.exe", "keepassxc.exe",
 	"bitwarden.exe", "lastpass.exe", "dashlane.exe", "nordpass.exe",
@@ -33,7 +34,7 @@ export const DEFAULT_DENY_APPS = [
 	"mstsc.exe", "quickassist.exe", "teamviewer.exe", "anydesk.exe",
 ] as const;
 
-const configSchema = z.object({
+const configSchema = z.strictObject({
 	/** Absolute path to the signed OpenAI Computer Use helper. */
 	helperPath: z.string().min(1).optional(),
 	/** Absolute path to the signed Codex CLI executable used for helper auth. */
@@ -46,9 +47,9 @@ const configSchema = z.object({
 	elicitationFallback: z.enum(["auto", "deny"]).default("auto"),
 	/** Verify Authenticode signatures before running the helper or Codex. */
 	verifySignatures: z.boolean().default(true),
-	/** Extra app patterns to deny. Combined with DEFAULT_DENY_APPS. */
+	/** Extra app patterns to deny. Combined with DEFAULT_DENY_APPS. `*` is a wildcard. */
 	denyApps: z.array(z.string().min(1)).default([]),
-	/** If non-empty, only these app patterns may be driven. */
+	/** Apps pre-approved without a prompt. Matching is exact unless a pattern contains `*`. */
 	allowApps: z.array(z.string().min(1)).default([]),
 	/** Maximum single screenshot accepted from the helper, after base64 decoding. */
 	maxScreenshotBytes: z.number().int().min(0).max(32 * 1024 * 1024).default(8 * 1024 * 1024),
@@ -79,20 +80,93 @@ export function defaultCodexHome(): string {
 	return process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
 }
 
-export async function loadConfig(stateRoot = defaultStateRoot()): Promise<AppConfig> {
-	const file = configPath(stateRoot);
-	let raw: unknown = {};
+async function readRawObject(file: string): Promise<Record<string, unknown>> {
+	let text: string;
 	try {
-		raw = JSON.parse(await readFile(file, "utf8"));
+		text = await readFile(file, "utf8");
 	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return configSchema.parse({});
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
 		throw new CuaError("CONFIG_ERROR", `Cannot read ${file}: ${errorMessage(error)}`, { cause: error });
 	}
+	let raw: unknown;
+	try {
+		raw = JSON.parse(text);
+	} catch (error) {
+		throw new CuaError("CONFIG_ERROR", `Cannot read ${file}: ${errorMessage(error)}`, { cause: error });
+	}
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+		throw new CuaError("CONFIG_ERROR", `Invalid ${file}: expected a JSON object`);
+	}
+	return raw as Record<string, unknown>;
+}
+
+function parseConfig(file: string, raw: unknown): AppConfig {
 	const parsed = configSchema.safeParse(raw);
 	if (!parsed.success) {
-		throw new CuaError("CONFIG_ERROR", `Invalid ${file}: ${parsed.error.message}`);
+		const unknownKeys = parsed.error.issues.some(issue => issue.code === "unrecognized_keys");
+		const hint = unknownKeys ? ` Supported keys: ${Object.keys(configSchema.shape).join(", ")}.` : "";
+		throw new CuaError("CONFIG_ERROR", `Invalid ${file}: ${parsed.error.message}${hint}`);
 	}
 	return parsed.data;
+}
+
+export async function loadConfig(stateRoot = defaultStateRoot()): Promise<AppConfig> {
+	const file = configPath(stateRoot);
+	const raw = await readRawObject(file);
+	return parseConfig(file, raw);
+}
+
+export type ConfigListKey = "allowApps" | "denyApps";
+
+export async function readConfigList(stateRoot: string, key: ConfigListKey): Promise<string[]> {
+	return (await loadConfig(stateRoot))[key];
+}
+
+export interface ConfigListUpdate {
+	file: string;
+	key: ConfigListKey;
+	list: string[];
+	changed: string[];
+}
+
+/** Adds or removes entries and writes the file atomically. Never writes an invalid config. */
+export async function updateConfigList(
+	stateRoot: string,
+	key: ConfigListKey,
+	operation: "add" | "remove",
+	values: string[],
+): Promise<ConfigListUpdate> {
+	const file = configPath(stateRoot);
+	const raw = await readRawObject(file);
+	const config = parseConfig(file, raw);
+	const entries = values.map(value => value.trim()).filter(Boolean);
+	if (entries.length === 0) throw new CuaError("CONFIG_ERROR", `No ${key} entries were provided`);
+	let list = [...config[key]];
+	const changed: string[] = [];
+	if (operation === "add") {
+		const present = new Set(list.map(entry => entry.toLowerCase()));
+		for (const entry of entries) {
+			if (present.has(entry.toLowerCase())) continue;
+			present.add(entry.toLowerCase());
+			list.push(entry);
+			changed.push(entry);
+		}
+	} else {
+		const dropped = new Set(entries.map(entry => entry.toLowerCase()));
+		list = list.filter(entry => {
+			if (!dropped.has(entry.toLowerCase())) return true;
+			changed.push(entry);
+			return false;
+		});
+	}
+	if (changed.length === 0) return { file, key, list, changed };
+	const next = { ...raw, [key]: list };
+	parseConfig(file, next);
+	await mkdir(stateRoot, { recursive: true });
+	const temporary = `${file}.${randomUUID()}.tmp`;
+	await writeFile(temporary, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+	await rename(temporary, file);
+	return { file, key, list, changed };
 }
 
 export function effectiveDenyApps(config: AppConfig): string[] {

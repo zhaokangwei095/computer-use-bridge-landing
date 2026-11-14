@@ -8,6 +8,8 @@ import type {
 	HelperWindowState,
 } from "./helper-client.ts";
 import { HelperError } from "./errors.ts";
+import { Observations } from "./observations.ts";
+import { desktopSchemas } from "./desktop-tools.ts";
 
 export interface SkyOptions {
 	helper: HelperClient;
@@ -80,7 +82,7 @@ function toScreenshot(value: unknown, maxBytes: number): HelperScreenshot {
 	}
 	const comma = url.indexOf(",");
 	const base64 = comma >= 0 ? url.slice(comma + 1) : "";
-	const approximateBytes = Math.floor((base64.length * 3) / 4);
+	const approximateBytes = Buffer.byteLength(Buffer.from(base64, "base64"));
 	const screenshot: HelperScreenshot = {
 		id: typeof value.id === "string" && value.id ? value.id : "screenshot-0",
 		zIndex: typeof value.zIndex === "number" && Number.isFinite(value.zIndex) ? value.zIndex : 0,
@@ -150,6 +152,11 @@ function assertLaunchTarget(app: string): void {
 
 export class Sky {
 	readonly target = "windows" as const;
+	private readonly observations = new Observations(this);
+	invalidateObservations(reset = false): void { this.observations.invalidate(reset); }
+	async observe_window(input: unknown) { return this.observations.observe(desktopSchemas.observe_window.parse(input)); }
+	async click_element(input: unknown) { return this.observations.act("click", desktopSchemas.click_element.parse(input)); }
+	async set_value_observed(input: unknown) { return this.observations.act("set", desktopSchemas.set_value.parse(input)); }
 	private readonly helper: HelperClient;
 	private readonly onImage?: (dataUrl: string) => void;
 	private readonly maxScreenshotBytes: number;
@@ -169,6 +176,11 @@ export class Sky {
 	}
 
 	private imageSink?: (dataUrl: string) => void;
+	private imageOmissionSink?: (reason: string, count: number) => void;
+
+	setImageOmissionSink(sink: ((reason: string, count: number) => void) | undefined): void {
+		this.imageOmissionSink = sink;
+	}
 
 	private emitImage(url: string): void {
 		if (!url) return;
@@ -227,6 +239,7 @@ export class Sky {
 		if (!includeScreenshot && !includeText) {
 			throw new TypeError("get_window_state must request include_text, include_screenshot, or both");
 		}
+		this.invalidateObservations();
 		const raw = await this.helper.getWindowState({ window, include_screenshot: includeScreenshot, include_text: includeText });
 		if (!isRecord(raw)) throw new HelperError("HELPER_ERROR", "helper returned invalid window state");
 		const resultWindow = toWindow(raw.window ?? window);
@@ -235,7 +248,13 @@ export class Sky {
 		const screenshots = Array.isArray(raw.screenshots)
 			? raw.screenshots.slice(0, this.maxScreenshots).map((screenshot) => toScreenshot(screenshot, this.maxScreenshotBytes))
 			: [];
-		for (const screenshot of screenshots) this.emitImage(screenshot.url);
+		if (Array.isArray(raw.screenshots) && raw.screenshots.length > this.maxScreenshots) {
+			this.imageOmissionSink?.("sky_image_count_limit", raw.screenshots.length - this.maxScreenshots);
+		}
+		for (const screenshot of screenshots) {
+			if (!screenshot.url && screenshot.urlOmitted) this.imageOmissionSink?.("per_image_budget", 1);
+			this.emitImage(screenshot.url);
+		}
 		return {
 			window: resultWindow,
 			screenshots,
@@ -245,6 +264,7 @@ export class Sky {
 
 	async activate_window(input: { window: unknown }): Promise<void> {
 		const window = toWindow(input?.window);
+		this.invalidateObservations();
 		await this.helper.activateWindow({ window });
 	}
 
@@ -252,6 +272,7 @@ export class Sky {
 		if (!isRecord(input)) throw new TypeError("launch_app input must be an object");
 		const app = toText(input.app, "app");
 		assertLaunchTarget(app);
+		this.invalidateObservations();
 		await this.helper.launchApp({ app });
 	}
 
@@ -262,6 +283,7 @@ export class Sky {
 		if (!MOUSE_BUTTONS.has(mouseButton)) throw new TypeError(`mouse_button must be one of ${[...MOUSE_BUTTONS].join(", ")}`);
 		if (input.element_index !== undefined && input.element_index !== null) {
 			const elementIndex = toInteger(input.element_index, "element_index", 0);
+			this.invalidateObservations();
 			await this.helper.click({ window, element_index: elementIndex, click_count: clickCount, mouse_button: mouseButton });
 			return;
 		}
@@ -272,6 +294,7 @@ export class Sky {
 		const y = toFinite(input.y, "y");
 		const params: Record<string, unknown> = { window, x, y, click_count: clickCount, mouse_button: mouseButton };
 		if (typeof input.screenshotId === "string") params.screenshotId = input.screenshotId;
+		this.invalidateObservations();
 		await this.helper.click(params);
 	}
 
@@ -280,6 +303,7 @@ export class Sky {
 		const window = toWindow(input.window);
 		const key = toText(input.key, "key");
 		assertSafeKey(key);
+		this.invalidateObservations();
 		await this.helper.pressKey({ window, key });
 	}
 
@@ -288,6 +312,7 @@ export class Sky {
 		const window = toWindow(input.window);
 		if (typeof input.text !== "string") throw new TypeError("text is required");
 		if (input.text.length > 100_000) throw new TypeError("text is too long (maximum 100000 characters per call)");
+		this.invalidateObservations();
 		await this.helper.typeText({ window, text: input.text });
 	}
 
@@ -302,6 +327,7 @@ export class Sky {
 			scrollY: toFinite(input.scrollY, "scrollY"),
 		};
 		if (typeof input.screenshotId === "string") params.screenshotId = input.screenshotId;
+		this.invalidateObservations();
 		await this.helper.scroll(params);
 	}
 
@@ -310,6 +336,7 @@ export class Sky {
 		const window = toWindow(input.window);
 		const elementIndex = toInteger(input.element_index, "element_index", 0);
 		if (typeof input.value !== "string") throw new TypeError("value is required");
+		this.invalidateObservations();
 		await this.helper.setValue({ window, element_index: elementIndex, value: input.value });
 	}
 
@@ -324,6 +351,7 @@ export class Sky {
 			to_y: toFinite(input.to_y, "to_y"),
 		};
 		if (typeof input.screenshotId === "string") params.screenshotId = input.screenshotId;
+		this.invalidateObservations();
 		await this.helper.drag(params);
 	}
 
@@ -332,6 +360,7 @@ export class Sky {
 		const window = toWindow(input.window);
 		const elementIndex = toInteger(input.element_index, "element_index", 0);
 		const action = toText(input.action, "action");
+		this.invalidateObservations();
 		await this.helper.performSecondaryAction({ window, element_index: elementIndex, action });
 	}
 
@@ -340,6 +369,7 @@ export class Sky {
 	}
 
 	abort(reason?: string): void {
+		this.invalidateObservations(true);
 		this.helper.abort(reason);
 	}
 }

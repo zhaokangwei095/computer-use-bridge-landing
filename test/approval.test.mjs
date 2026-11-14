@@ -4,7 +4,8 @@ import {
 	appCandidates,
 	ApprovalController,
 	buildApprovalElicitationParams,
-	isAppAllowed,
+	isAppDenied,
+	isAppPreApproved,
 } from "../dist/approval.js";
 import { DEFAULT_DENY_APPS } from "../dist/config.js";
 import { requestApprovalFromMcpClient } from "../dist/mcp-elicitation.js";
@@ -32,22 +33,71 @@ describe("app matching", () => {
 	});
 
 	test("matches executable stems in both directions", () => {
-		assert.equal(isAppAllowed("cmd", undefined, ["cmd.exe"], []), false);
-		assert.equal(isAppAllowed("C:\\Windows\\System32\\CMD.EXE", undefined, ["cmd"], []), false);
-		assert.equal(isAppAllowed(APP, "Notepad", DEFAULT_DENY_APPS, []), true);
-		assert.equal(isAppAllowed("process:C:\\Windows\\System32\\WindowsTerminal.exe", "Terminal", DEFAULT_DENY_APPS, []), false);
-		assert.equal(isAppAllowed("OpenAI.Codex_2p2nqsd0c76g0!App", undefined, DEFAULT_DENY_APPS, []), false);
+		assert.equal(isAppDenied("cmd", undefined, ["cmd.exe"]), true);
+		assert.equal(isAppDenied("C:\\Windows\\System32\\CMD.EXE", undefined, ["cmd"]), true);
+		assert.equal(isAppDenied(APP, "Notepad", DEFAULT_DENY_APPS), false);
+		assert.equal(isAppDenied("process:C:\\Windows\\System32\\WindowsTerminal.exe", "Terminal", DEFAULT_DENY_APPS), true);
+		assert.equal(isAppDenied("OpenAI.Codex_2p2nqsd0c76g0!App", undefined, DEFAULT_DENY_APPS), true);
 	});
 
-	test("deny wins over allow and allow restricts otherwise", () => {
-		assert.equal(isAppAllowed(APP, "Notepad", ["notepad.exe"], ["notepad.exe"]), false);
-		assert.equal(isAppAllowed(APP, "Notepad", [], ["notepad.exe"]), true);
-		assert.equal(isAppAllowed("calc.exe", "Calculator", [], ["notepad.exe"]), false);
+	test("deny patterns support an explicit wildcard and nothing implicit", () => {
+		assert.equal(isAppDenied("C:\\Temp\\steam-helper.exe", undefined, ["steam*"]), true);
+		assert.equal(isAppDenied("C:\\Temp\\notepad-helper.exe", undefined, ["notepad.exe"]), false);
+		assert.equal(isAppDenied("C:\\Temp\\notepadx.exe", undefined, ["notepad.exe"]), false);
 	});
 
-	test("does not let a spoofed display name satisfy the allow list", () => {
-		assert.equal(isAppAllowed("C:\\temp\\evil.exe", "notepad.exe", [], ["notepad.exe"]), false);
-		assert.equal(isAppAllowed("C:\\temp\\evil.exe", "Notepad", ["notepad.exe"], []), false);
+	test("deny list still wins over a matching pre-approval", () => {
+		const denied = controller({denyApps: ["notepad.exe"], allowApps: ["notepad.exe"]});
+		assert.throws(() => denied.assertAllowed(APP, "Notepad"), error => error.code === "APPROVAL_DENIED");
+	});
+
+	test("allow list pre-approves without blocking other apps", async () => {
+		const approval = controller({allowApps: ["notepad.exe"]});
+		assert.equal(await approval.approve({app: APP, displayName: "Notepad"}), "accept");
+		assert.equal(await approval.approve({app: "calc.exe", displayName: "Calculator"}), "accept");
+		assert.doesNotThrow(() => approval.assertAllowed("calc.exe", "Calculator"));
+	});
+
+	test("allow list skips the client prompt in mcp mode", async () => {
+		let prompts = 0;
+		const approval = controller({
+			mode: "mcp",
+			allowApps: ["notepad.exe"],
+			elicit: async () => { prompts += 1; return "accept"; },
+		});
+		assert.equal(await approval.approve({app: APP, displayName: "Notepad"}), "accept");
+		assert.equal(prompts, 0);
+		assert.equal(await approval.approve({app: "calc.exe", displayName: "Calculator"}), "accept");
+		assert.equal(prompts, 1);
+	});
+
+	test("allow list is the only path through deny mode", async () => {
+		const approval = controller({mode: "deny", allowApps: ["notepad.exe"]});
+		assert.equal(await approval.approve({app: APP, displayName: "Notepad"}), "accept");
+		await assert.rejects(
+			() => approval.approve({app: "calc.exe", displayName: "Calculator"}),
+			error => error.code === "APPROVAL_DENIED",
+		);
+	});
+
+	test("allow list matches bare app ids and executable stems", () => {
+		const allow = ["chrome.exe"];
+		assert.equal(isAppPreApproved("process:C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe", allow), true);
+		assert.equal(isAppPreApproved("Chrome", allow), true);
+		assert.equal(isAppPreApproved("D:/Other/chrome-helper.exe", allow), false);
+		assert.equal(isAppPreApproved("Microsoft.WindowsCalculator_8wekyb3d8bbwe!App", ["Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"]), true);
+		assert.equal(isAppPreApproved("Microsoft.WindowsCalculator_8wekyb3d8bbwe!Other", ["Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"]), false);
+	});
+
+	test("an allow path covers only that exact location", () => {
+		const allow = ["C:/Trusted/notepad.exe"];
+		assert.equal(isAppPreApproved("process:C:\\Trusted\\notepad.exe", allow), true);
+		assert.equal(isAppPreApproved("D:/Other/notepad.exe", allow), false);
+		assert.equal(isAppPreApproved("notepad.exe", allow), false);
+	});
+
+	test("pre-approval never uses a display name", () => {
+		assert.equal(isAppPreApproved("C:\\temp\\evil.exe", ["notepad.exe"]), false);
 	});
 
 	test("assertAllowed reports the actual reason", () => {
@@ -57,12 +107,8 @@ describe("app matching", () => {
 			assert.match(error.message, /deny list/);
 			return true;
 		});
-		const notAllowed = controller({ allowApps: ["calculator.exe"] });
-		assert.throws(() => notAllowed.assertAllowed(APP, "Notepad"), (error) => {
-			assert.equal(error.code, "APPROVAL_DENIED");
-			assert.match(error.message, /allow list/);
-			return true;
-		});
+		const notListed = controller({ allowApps: ["calculator.exe"] });
+		assert.doesNotThrow(() => notListed.assertAllowed(APP, "Notepad"));
 	});
 });
 
@@ -125,6 +171,28 @@ describe("ApprovalController", () => {
 		);
 	});
 
+	test("elicitation adapter failures reach the configured fallback", async () => {
+		for (const fallback of ["auto", "deny"]) {
+			const approval = controller({
+				mode: "mcp", fallback,
+				elicit: (request, options) => requestApprovalFromMcpClient({
+					elicitInput: async () => { throw new Error("Client does not support elicitation"); },
+				}, request, options?.signal),
+			});
+			if (fallback === "auto") assert.equal(await approval.approve({ app: APP, displayName: "Notepad" }), "accept");
+			else await assert.rejects(() => approval.approve({ app: APP, displayName: "Notepad" }), error => error.code === "APPROVAL_DENIED");
+		}
+	});
+
+	test("explicit cancellation never uses the auto fallback", async () => {
+		const approval = controller({
+			mode: "mcp", fallback: "auto",
+			elicit: request => requestApprovalFromMcpClient({elicitInput: async () => ({action: "cancel"})}, request),
+		});
+		await assert.rejects(() => approval.approve({app: APP, displayName: "Notepad"}), error => error.code === "APPROVAL_DENIED");
+		assert.deepEqual(approval.approvedApps, []);
+	});
+
 	test("no elicitation support follows the fallback", async () => {
 		const auto = controller({ mode: "mcp", fallback: "auto" });
 		assert.equal(await auto.approve({ app: APP, displayName: "Notepad" }), "accept");
@@ -145,6 +213,18 @@ describe("ApprovalController", () => {
 });
 
 describe("elicitation", () => {
+	test("an aborted prompt cannot become an auto approval", async () => {
+		const abort = new AbortController();
+		const approval = controller({
+			mode: "mcp", fallback: "auto",
+			elicit: (request, options) => requestApprovalFromMcpClient({
+				elicitInput: async () => { abort.abort(); throw new Error("aborted"); },
+			}, request, options?.signal),
+		});
+		await assert.rejects(() => approval.approve({app: APP, displayName: "Notepad"}, {signal: abort.signal}), error => error.code === "APPROVAL_DENIED");
+		assert.deepEqual(approval.approvedApps, []);
+	});
+
 	test("builds a form that includes the app id and sanitizes display text", () => {
 		const params = buildApprovalElicitationParams({
 			app: APP,
@@ -176,8 +256,8 @@ describe("elicitation", () => {
 		assert.equal(await requestApprovalFromMcpClient(client({ action: "cancel" }), {
 			app: APP, displayName: "Notepad",
 		}), "cancel");
-		assert.equal(await requestApprovalFromMcpClient({ elicitInput: async () => { throw new Error("nope"); } }, {
+		await assert.rejects(() => requestApprovalFromMcpClient({ elicitInput: async () => { throw new Error("nope"); } }, {
 			app: APP, displayName: "Notepad",
-		}), "cancel");
+		}), /nope/);
 	});
 });

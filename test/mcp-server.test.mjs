@@ -43,7 +43,7 @@ after(async () => {
 describe("MCP server", () => {
 	test("lists the Computer Use tools in order", async () => {
 		const result = await client.listTools();
-		assert.deepEqual(result.tools.map((tool) => tool.name), ["js", "js_reset", "computer_use_status"]);
+		assert.deepEqual(result.tools.map((tool) => tool.name), ["js", "js_reset", "computer_use_status", "list_windows", "observe_window", "click_element", "set_value"]);
 		const js = result.tools[0];
 		assert.equal(js.inputSchema.required[0], "code");
 		assert.equal(js.annotations.destructiveHint, true);
@@ -66,6 +66,8 @@ describe("MCP server", () => {
 		const result = await client.callTool({ name: "js", arguments: { code: "1 + 1" } });
 		assert.equal(result.isError, true);
 		assert.match(result.content[0].text, /Configured helperPath does not exist/);
+		assert.equal(result.structuredContent.error.code, "DISCOVERY_FAILED");
+		assert.equal(result.structuredContent.error.action_sent, "not_sent");
 	});
 
 	test("returns structured status with the auto-approval warning", async () => {

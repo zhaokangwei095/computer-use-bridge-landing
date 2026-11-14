@@ -3,7 +3,10 @@ import { appendFileSync } from "node:fs";
 const logPath = process.env.FAKE_HELPER_LOG;
 const approval = process.env.FAKE_HELPER_APPROVAL === "1";
 const slowMs = Number(process.env.FAKE_HELPER_SLOW_MS || "0");
+const slowMethod = process.env.FAKE_HELPER_SLOW_METHOD || "list_windows";
+const approvalMethod = process.env.FAKE_HELPER_APPROVAL_METHOD || "get_window_state";
 const crashOn = process.env.FAKE_HELPER_CRASH_ON || "";
+const browserUrlFailure = process.env.FAKE_HELPER_BROWSER_URL_FAILURE === "1";
 
 const APP = "process:C:\\Windows\\System32\\notepad.exe";
 const PNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nQAAAABJRU5ErkJggg==";
@@ -73,15 +76,19 @@ async function handle(line) {
 		setTimeout(() => process.exit(7), 20);
 		return;
 	}
+	if (method === "get_window_state" && browserUrlFailure) {
+		send({ id, ok: false, error: "Could not determine the current browser URL on Windows with enough confidence to enforce policy." });
+		return;
+	}
 	if (method === "get_window_state" && params.window && params.window.id === 202) {
 		send({ id, ok: false, error: "window is minimized" });
 		return;
 	}
-	if (slowMs > 0 && method === "list_windows") {
+	if (slowMs > 0 && method === slowMethod) {
 		await new Promise((resolve) => setTimeout(resolve, slowMs));
 	}
 	if (
-		method === "get_window_state" &&
+		method === approvalMethod &&
 		approval &&
 		(!meta || meta["x-oai-cua-approved-app"] !== APP)
 	) {

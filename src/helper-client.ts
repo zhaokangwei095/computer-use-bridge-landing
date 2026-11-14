@@ -4,6 +4,7 @@ import path from "node:path";
 import { createInterface, type Interface } from "node:readline";
 import type { ApprovalController, HelperApprovalRequest } from "./approval.ts";
 import { HelperError } from "./errors.ts";
+import { isMutation, withErrorContext } from "./error-envelope.ts";
 
 export interface HelperWindow {
 	app: string;
@@ -111,6 +112,12 @@ function stripAnsi(value: string): string {
 
 function errorHint(stderr: string): string {
 	const text = stderr.toLowerCase();
+	if (
+		text.includes("browser url") &&
+		(text.includes("confidence") || text.includes("determine"))
+	) {
+		return " The official Windows helper could not verify the browser's current URL and blocked access. This port does not provide browser tab control; use DSH's official node_repl Browser Service through the documented CUA browser surface. If that service denies access because DSH lacks authorized host session context, surface the limitation; do not fabricate context or infer a URL.";
+	}
 	if (text.includes("window is minimized") || text.includes("window is not visible")) {
 		return " The window is minimized or hidden. Call sky.activate_window({window}), refresh it with sky.get_window({id, app}), then retry get_window_state.";
 	}
@@ -338,6 +345,9 @@ export class HelperClient {
 		const id = this.nextId++;
 		const timeoutMs = this.timeoutFor(method);
 		return new Promise<HelperResponse>((resolve, reject) => {
+			const rejectRequest = (error: Error): void => {
+				reject(withErrorContext(error, { method, action_sent: isMutation(method) ? "possibly_sent" : "not_applicable" }));
+			};
 			const timeout = setTimeout(() => {
 				if (!this.pending.has(id)) return;
 				this.pending.delete(id);
@@ -351,9 +361,9 @@ export class HelperClient {
 				this.killTree(child);
 				this.failAll(error, false, child);
 				if (this.child === child) this.child = null;
-				reject(error);
+				rejectRequest(error);
 			}, timeoutMs);
-			this.pending.set(id, { resolve, reject, timeout, method, child });
+			this.pending.set(id, { resolve, reject: rejectRequest, timeout, method, child });
 			// Always align the helper's own request budget with the client timer.
 			// The official transport overwrites this value on every request.
 			const requestMeta = { ...(meta ?? {}), "x-oai-cua-request-budget-ms": timeoutMs };
@@ -364,7 +374,7 @@ export class HelperClient {
 				if (!pending) return;
 				this.pending.delete(id);
 				clearTimeout(pending.timeout);
-				reject(new HelperError("HELPER_START_FAILED", `Could not write to the Computer Use helper: ${error.message}`, { cause: error, helperMethod: method }));
+				rejectRequest(new HelperError("HELPER_START_FAILED", `Could not write to the Computer Use helper: ${error.message}`, { cause: error, helperMethod: method }));
 			});
 		});
 	}
@@ -398,10 +408,14 @@ export class HelperClient {
 		epoch = this.epoch,
 	): Promise<HelperResponse> {
 		if (epoch !== this.epoch) {
-			throw new HelperError("HELPER_EXITED", "Computer Use request was cancelled", { helperMethod: method });
+			throw withErrorContext(new HelperError("HELPER_EXITED", "Computer Use request was cancelled", { helperMethod: method }), { method, action_sent: "not_sent", retry: "never" });
 		}
-		this.assertRequestAllowed(method, params);
-		return this.sendRaw(method, params, meta);
+		try {
+			this.assertRequestAllowed(method, params);
+			return await this.sendRaw(method, params, meta);
+		} catch (error) {
+			throw withErrorContext(error, { method, action_sent: isMutation(method) ? "not_sent" : "not_applicable" });
+		}
 	}
 
 	private async requestWithApproval(method: string, params: Record<string, unknown>): Promise<unknown> {
@@ -411,16 +425,20 @@ export class HelperClient {
 			if (response.ok) return response.result;
 			const request = response.approvalRequest;
 			this.log(`approval requested for ${request.displayName} (${request.app})`);
-			await this.options.approval.approve(request);
+			try {
+				await this.options.approval.approve(request);
+			} catch (error) {
+				throw withErrorContext(error, { method, action_sent: isMutation(method) ? "not_sent" : "not_applicable", retry: "never" });
+			}
 			// The run may have timed out or been cancelled while the approval
 			// prompt was open. Never execute the action afterwards on a new helper.
 			if (epoch !== this.epoch) {
-				throw new HelperError("HELPER_EXITED", "Computer Use request was cancelled while waiting for approval", { helperMethod: method });
+				throw withErrorContext(new HelperError("HELPER_EXITED", "Computer Use request was cancelled while waiting for approval", { helperMethod: method }), { method, action_sent: isMutation(method) ? "not_sent" : "not_applicable", retry: "never" });
 			}
 			const meta = { "x-oai-cua-approved-app": request.app };
 			response = await this.requestOnce(method, params, meta, epoch);
 		}
-		throw new HelperError("HELPER_ERROR", `Computer Use kept requesting approval for ${method}; giving up`, { helperMethod: method });
+		throw withErrorContext(new HelperError("HELPER_ERROR", `Computer Use kept requesting approval for ${method}; giving up`, { helperMethod: method }), { method, action_sent: isMutation(method) ? "not_sent" : "not_applicable", retry: "never" });
 	}
 
 	listApps(): Promise<HelperApp[]> {

@@ -3,6 +3,7 @@ import { parentPort, workerData } from "node:worker_threads";
 import util from "node:util";
 import vm from "node:vm";
 import { parse } from "acorn";
+import { serializeError } from "./error-envelope.ts";
 
 // These names exist only inside the vm context. They are installed on the
 // context object before installGlobals runs, and captured by closures.
@@ -106,7 +107,8 @@ function formatError(error: unknown): string {
 }
 
 function emitOutput(text: string): void {
-	post({ type: "output", id: runContext.getStore(), text });
+	const rendered = text.replace(/data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=]*/gi, "[image data omitted from text; see image content or imageReport]");
+	post({ type: "output", id: runContext.getStore(), text: rendered });
 }
 
 function clearTimers(): void {
@@ -128,7 +130,7 @@ function createContext(): void {
 		const id = nextRpcId++;
 		return new Promise<string>((resolve, reject) => {
 			pendingRpc.set(id, { resolve, reject });
-			post({ type: "rpc", id, method, argsJson });
+			post({ type: "rpc", id, runId: runContext.getStore(), method, argsJson });
 		});
 	};
 	sandbox.__write = (text: string): void => {
@@ -233,8 +235,21 @@ function installGlobals(): void {
 					// The bridge rejects with a primitive string so a host-realm Error
 					// cannot leak its constructor into the context. Rebuild the Error
 					// with the context realm's own Error constructor.
-					const message = typeof reason === "string" && reason.trim() ? reason : "Computer Use RPC failed";
-					reject(new Error(message));
+					let envelope: Record<string, unknown> = {};
+					if (typeof reason === "string") {
+						try {
+							const parsed = JSON.parse(reason);
+							if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) envelope = parsed;
+						} catch {}
+					}
+					const message = typeof envelope.message === "string" ? envelope.message
+						: typeof reason === "string" ? reason : "Computer Use RPC failed";
+					const error = new Error(message);
+					for (const key of ["code", "method", "retry", "action_sent", "side_effect"]) {
+						if (typeof envelope[key] === "string") Object.defineProperty(error, key, { value: envelope[key], enumerable: true });
+					}
+					if (typeof envelope.session_reset === "boolean") Object.defineProperty(error, "session_reset", { value: envelope.session_reset, enumerable: true });
+					reject(error);
 				},
 			);
 		});
@@ -285,6 +300,9 @@ function installGlobals(): void {
 	});
 	defineGlobal("__scope", scope);
 	const sky = Object.freeze({
+		observe_window: (input: unknown): Promise<unknown> => rpc("sky.observe_window", [input]),
+		click_element: (input: unknown): Promise<unknown> => rpc("sky.click_element", [input]),
+		set_value_observed: (input: unknown): Promise<unknown> => rpc("sky.set_value_observed", [input]),
 		target: "windows",
 		list_apps: (): Promise<unknown> => rpc("sky.list_apps", []),
 		list_windows: (): Promise<unknown> => rpc("sky.list_windows", []),
@@ -619,7 +637,7 @@ async function handleRun(message: { id: number; code: string }): Promise<void> {
 			post({ type: "result", id: message.id, ok: true, durationMs: Date.now() - started });
 		});
 	} catch (error) {
-		post({ type: "result", id: message.id, ok: false, error: formatError(error), durationMs: Date.now() - started });
+		post({ type: "result", id: message.id, ok: false, error: formatError(error), errorInfo: serializeError(error), durationMs: Date.now() - started });
 	} finally {
 		running = false;
 	}

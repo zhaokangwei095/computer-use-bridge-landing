@@ -17,6 +17,10 @@ export interface AuditRecord {
 	approval?: "accept" | "decline" | "cancel" | null;
 	resultContentTypes: string[];
 	errorCode?: string | null;
+	actionSent?: "not_applicable" | "not_sent" | "sent" | "possibly_sent";
+	retry?: "never" | "reobserve";
+	sessionReset?: boolean;
+	imagesOmitted?: number;
 }
 
 async function ensurePrivateDirectory(directory: string): Promise<void> {

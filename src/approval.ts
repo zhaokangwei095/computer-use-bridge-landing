@@ -52,40 +52,62 @@ function stripExe(value: string): string {
 	return value.replace(/\.exe$/i, "");
 }
 
+function globMatch(value: string, pattern: string): boolean {
+	const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
+	return new RegExp(`^${escaped}$`, "i").test(value);
+}
+
 function matchesPattern(candidates: string[], pattern: string): boolean {
 	const wanted = pattern.trim().toLowerCase();
 	if (!wanted) return false;
 	const wantedBase = path.win32.basename(wanted);
 	const wantedStem = stripExe(wantedBase);
+	const wildcard = wanted.includes("*");
 	return candidates.some((candidate) => {
 		const candidateBase = path.win32.basename(candidate);
 		const candidateStem = stripExe(candidateBase);
+		if (wildcard) {
+			return [candidate, candidateBase, candidateStem].some((value) => globMatch(value, wanted) || globMatch(value, wantedBase));
+		}
 		return candidate === wanted ||
 			candidate === wantedBase ||
 			candidateBase === wantedBase ||
-			(wantedStem !== "" && (candidateStem === wantedStem || candidateStem.includes(wantedStem))) ||
-			candidate.includes(wanted) ||
-			candidate.includes(wantedBase);
+			(wantedStem !== "" && candidateStem === wantedStem);
 	});
 }
 
-function denialReason(
-	candidates: string[],
-	denyPatterns: string[],
-	allowPatterns: string[],
-	identityCandidates: string[] = candidates,
-): string | null {
-	// Deny matching may use display names as extra evidence; allow matching must
-	// not, because displayName is untrusted and easy to spoof.
-	if (denyPatterns.some((pattern) => matchesPattern(candidates, pattern))) return "the app is on the deny list";
-	if (allowPatterns.length > 0 && !allowPatterns.some((pattern) => matchesPattern(identityCandidates, pattern))) {
-		return "the app is not in the allow list";
+/**
+ * Pre-approval matching is exact on purpose: a full path covers only that
+ * location, a bare executable name or app id covers every location of that
+ * identity, and display names are ignored because they are spoofable. Write an
+ * explicit `*` to opt into broader matching.
+ */
+function matchesAllowedApp(app: string, pattern: string): boolean {
+	const wanted = pattern.trim().toLowerCase().replace(/^process:/, "").replace(/!app$/i, "");
+	if (!wanted) return false;
+	const identity = appCandidates(app);
+	if (/[\\/]/.test(wanted) && !wanted.includes("*")) {
+		const normalized = path.win32.normalize(wanted);
+		return identity.some((candidate) => /[\\/]/.test(candidate) && path.win32.normalize(candidate) === normalized);
 	}
+	if (wanted.includes("*")) return matchesPattern(identity, wanted);
+	const wantedBase = path.win32.basename(wanted);
+	const wantedStem = stripExe(wantedBase);
+	return identity.includes(wanted) || identity.includes(wantedBase) || identity.includes(wantedStem);
+}
+
+function denialReason(candidates: string[], denyPatterns: string[]): string | null {
+	// Deny matching may use display names as extra evidence.
+	if (denyPatterns.some((pattern) => matchesPattern(candidates, pattern))) return "the app is on the deny list";
 	return null;
 }
 
-export function isAppAllowed(app: string, displayName: string | undefined, denyPatterns: string[], allowPatterns: string[]): boolean {
-	return denialReason(appCandidates(app, displayName), denyPatterns, allowPatterns, appIdentityCandidates(app)) === null;
+export function isAppDenied(app: string, displayName: string | undefined, denyPatterns: string[]): boolean {
+	return denialReason(appCandidates(app, displayName), denyPatterns) !== null;
+}
+
+export function isAppPreApproved(app: string, allowPatterns: string[]): boolean {
+	return allowPatterns.some((pattern) => matchesAllowedApp(app, pattern));
 }
 
 export interface ApprovalControllerOptions {
@@ -98,10 +120,11 @@ export interface ApprovalControllerOptions {
 }
 
 /**
- * Decides whether an app may be controlled. Deny-list and allow-list checks
- * run before any prompt. In mcp mode, one accepted approval is remembered for
- * the life of the server process; the helper still receives its own retry
- * metadata for each request that it gates.
+ * Decides whether an app may be controlled. The deny list is a hard floor. A
+ * matching allow-list entry is pre-approved, so it skips the configured mode;
+ * everything else follows `auto` / `mcp` / `deny`. In mcp mode, one accepted
+ * approval is remembered for the life of the server process; the helper still
+ * receives its own retry metadata for each request that it gates.
  */
 export class ApprovalController {
 	readonly mode: AppConfig["approval"];
@@ -133,7 +156,7 @@ export class ApprovalController {
 
 	assertAllowed(app: string, displayName?: string): void {
 		const name = displayName || app;
-		const reason = denialReason(appCandidates(app, displayName), this.denyApps, this.allowApps, appIdentityCandidates(app));
+		const reason = denialReason(appCandidates(app, displayName), this.denyApps);
 		if (reason) throw new ApprovalDeniedError(app, name, reason);
 	}
 
@@ -141,6 +164,10 @@ export class ApprovalController {
 	async approve(request: HelperApprovalRequest, options?: RequestOptions): Promise<ApprovalDecision> {
 		this.assertAllowed(request.app, request.displayName);
 		if (this.approved.has(request.app)) return "accept";
+		if (isAppPreApproved(request.app, this.allowApps)) {
+			this.approved.add(request.app);
+			return "accept";
+		}
 		if (this.mode === "deny") {
 			throw new ApprovalDeniedError(request.app, request.displayName, "approval mode is deny");
 		}

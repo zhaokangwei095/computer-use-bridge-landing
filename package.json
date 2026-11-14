@@ -1,6 +1,6 @@
 {
   "name": "codex-computer-use-mcp-win",
-  "version": "0.1.0",
+  "version": "0.2.0-preview.1",
   "description": "Unofficial Windows port of codex-computer-use-mcp: drive native Windows apps through OpenAI's signed Computer Use helper, with no nested model.",
   "license": "MIT",
   "type": "module",
@@ -25,6 +25,7 @@
     "dist",
     "src",
     "README.md",
+    "CHANGELOG.md",
     "SECURITY.md",
     "LICENSE",
     "NOTICE.md"

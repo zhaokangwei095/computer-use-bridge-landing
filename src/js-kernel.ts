@@ -3,6 +3,7 @@ import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
 import { CuaError, errorMessage } from "./errors.ts";
+import { isMutation, serializeError, type ActionStatus, type SerializableError } from "./error-envelope.ts";
 import type { Sky } from "./sky.ts";
 
 export interface JsOutput {
@@ -10,9 +11,28 @@ export interface JsOutput {
 	images: string[];
 }
 
+export interface ImageReport {
+	requested: number;
+	returned: number;
+	omitted: number;
+	duplicates: number;
+	bytes: number;
+	reasons: Record<string, number>;
+	limits: { perImageBytes: number; totalBytes: number; count: number };
+}
+
+export interface ActionRecord {
+	method: string;
+	status: ActionStatus;
+}
+
 export interface JsRunResult {
 	ok: boolean;
 	error?: string;
+	errorInfo?: SerializableError;
+	imageReport?: ImageReport;
+	actions?: ActionRecord[];
+	actionsTruncated?: boolean;
 	durationMs: number;
 	output: JsOutput;
 	timedOut?: boolean;
@@ -39,7 +59,10 @@ interface WorkerRun {
 	images: string[];
 	imageBytes: number;
 	imageSet: Set<string>;
-	resolve: (result: { ok: boolean; error?: string; durationMs: number }) => void;
+	imageReport: ImageReport;
+	actions: ActionRecord[];
+	actionsTruncated: boolean;
+	resolve: (result: { ok: boolean; error?: string; errorInfo?: SerializableError; durationMs: number }) => void;
 	finished: boolean;
 }
 
@@ -48,12 +71,13 @@ interface WorkerResultMessage {
 	id: number;
 	ok: boolean;
 	error?: string;
+	errorInfo?: SerializableError;
 	durationMs: number;
 }
 
 type WorkerMessage =
 	| { type: "ready" }
-	| { type: "rpc"; id: number; method: string; argsJson: string }
+	| { type: "rpc"; id: number; runId?: number; method: string; argsJson: string }
 	| { type: "output"; id?: number; text: string }
 	| { type: "image"; id?: number; dataUrl: string }
 	| WorkerResultMessage
@@ -101,7 +125,7 @@ function imageByteLength(dataUrl: string): number {
 	const comma = dataUrl.indexOf(",");
 	if (comma < 0) return Number.POSITIVE_INFINITY;
 	const base64 = dataUrl.slice(comma + 1);
-	return Math.floor((base64.length * 3) / 4);
+	return Buffer.byteLength(Buffer.from(base64, "base64"));
 }
 
 export class JsKernel {
@@ -234,7 +258,7 @@ export class JsKernel {
 				return;
 			case "result":
 				if (this.currentRun && this.currentRun.id === message.id) {
-					this.finishRun({ ok: message.ok, error: message.error, durationMs: message.durationMs });
+					this.finishRun({ ok: message.ok, error: message.error, errorInfo: message.errorInfo, durationMs: message.durationMs });
 				}
 				return;
 			case "fatal":
@@ -258,36 +282,63 @@ export class JsKernel {
 		const run = this.currentRun;
 		if (!run || run.finished) return;
 		if (typeof dataUrl !== "string" || !dataUrl.startsWith("data:image/")) return;
-		if (run.images.length >= (this.options.maxOutputImages ?? 8)) return;
+		run.imageReport.requested += 1;
+		if (run.imageSet.has(dataUrl)) { run.imageReport.duplicates += 1; return; }
 		const bytes = imageByteLength(dataUrl);
-		if (!Number.isFinite(bytes)) return;
 		const maxImageBytes = this.options.maxImageBytes ?? 8 * 1024 * 1024;
-		if (bytes > maxImageBytes) return;
 		const maxTotalBytes = this.options.maxTotalImageBytes ?? Math.min(16 * 1024 * 1024, maxImageBytes * 4);
-		if (run.imageBytes + bytes > maxTotalBytes) return;
-		if (run.imageSet.has(dataUrl)) return;
+		const reason = !Number.isFinite(bytes) ? "invalid_image"
+			: bytes > maxImageBytes ? "per_image_budget"
+			: run.images.length >= (this.options.maxOutputImages ?? 8) ? "image_count_limit"
+			: run.imageBytes + bytes > maxTotalBytes ? "total_image_budget" : null;
+		if (reason) { this.omitImages(run, reason, 1); return; }
 		run.imageSet.add(dataUrl);
 		run.imageBytes += bytes;
 		run.images.push(dataUrl);
+		run.imageReport.returned = run.images.length;
+		run.imageReport.bytes = run.imageBytes;
 	}
 
-	private finishRun(result: { ok: boolean; error?: string; durationMs: number }): void {
+	private omitImages(run: WorkerRun, reason: string, count: number, requested = false): void {
+		if (run.finished || this.currentRun !== run) return;
+		if (requested) run.imageReport.requested += count;
+		run.imageReport.omitted += count;
+		run.imageReport.reasons[reason] = (run.imageReport.reasons[reason] ?? 0) + count;
+	}
+
+	private finishRun(result: { ok: boolean; error?: string; errorInfo?: SerializableError; durationMs: number }): void {
 		const run = this.currentRun;
 		if (!run || run.finished) return;
 		run.finished = true;
 		run.resolve(result);
 	}
 
-	private async handleRpc(worker: Worker, message: { id: number; method: string; argsJson: string }): Promise<void> {
+	private async handleRpc(worker: Worker, message: { id: number; runId?: number; method: string; argsJson: string }): Promise<void> {
+		const run = this.currentRun;
+		if (!run || run.finished || run.id !== message.runId) {
+			this.post(worker, { type: "rpc-result", id: message.id, ok: false, error: JSON.stringify(serializeError("Execution has already ended", { code: "CANCELLED", action_sent: "not_sent", retry: "never" })) });
+			return;
+		}
+		const action: ActionRecord | undefined = isMutation(message.method) ? { method: message.method, status: "possibly_sent" } : undefined;
+		if (action) {
+			if (run.actions.length < 128) run.actions.push(action);
+			else run.actionsTruncated = true;
+		}
 		try {
 			const args = JSON.parse(message.argsJson) as unknown;
 			if (!Array.isArray(args)) throw new Error("RPC arguments must be an array");
 			const result = await this.callSky(message.method, args);
+			if (action && this.currentRun === run) action.status = "sent";
 			const json = result === undefined ? "null" : JSON.stringify(result);
 			if (json.length > 64 * 1024 * 1024) throw new Error("Computer Use result is too large to return to the JavaScript runtime");
 			this.post(worker, { type: "rpc-result", id: message.id, ok: true, result: json });
 		} catch (error) {
-			this.post(worker, { type: "rpc-result", id: message.id, ok: false, error: errorMessage(error) });
+			const envelope = serializeError(error, {
+				method: message.method,
+				action_sent: action ? error instanceof TypeError ? "not_sent" : "possibly_sent" : "not_applicable",
+			});
+			if (action && this.currentRun === run) action.status = envelope.action_sent;
+			this.post(worker, { type: "rpc-result", id: message.id, ok: false, error: JSON.stringify(envelope) });
 		}
 	}
 
@@ -295,6 +346,9 @@ export class JsKernel {
 		const sky = this.options.sky;
 		switch (method) {
 			case "sky.list_apps": return await sky.list_apps();
+			case "sky.observe_window": return await sky.observe_window(args[0]);
+			case "sky.click_element": return await sky.click_element(args[0]);
+			case "sky.set_value_observed": return await sky.set_value_observed(args[0]);
 			case "sky.list_windows": return await sky.list_windows();
 			case "sky.get_window": return await sky.get_window(args[0] as { id: number | string; app?: string });
 			case "sky.get_window_state": return await sky.get_window_state(args[0] as Parameters<Sky["get_window_state"]>[0]);
@@ -351,18 +405,24 @@ export class JsKernel {
 		}
 		const worker = this.worker;
 		if (!worker) return { ok: false, error: "Computer Use JavaScript worker is not running", durationMs: 0, output: { text: [], images: [] } };
+		if (signal?.aborted) return { ok: false, error: "Execution cancelled before it started", errorInfo: serializeError("Execution cancelled before it started", { code: "CANCELLED", action_sent: "not_sent", retry: "never" }), aborted: true, durationMs: 0, output: { text: [], images: [] } };
+		const perImageBytes = this.options.maxImageBytes ?? 8 * 1024 * 1024;
 		const run: WorkerRun = {
 			id: this.nextRunId++,
 			text: new TextBuffer(this.options.maxTextBytes ?? 2 * 1024 * 1024),
 			images: [],
 			imageBytes: 0,
 			imageSet: new Set<string>(),
+			imageReport: { requested: 0, returned: 0, omitted: 0, duplicates: 0, bytes: 0, reasons: {}, limits: { perImageBytes, totalBytes: this.options.maxTotalImageBytes ?? Math.min(16 * 1024 * 1024, perImageBytes * 4), count: this.options.maxOutputImages ?? 8 } },
+			actions: [],
+			actionsTruncated: false,
 			resolve: () => { /* replaced below */ },
 			finished: false,
 		};
 		this.currentRun = run;
 		this.options.sky.setImageSink((dataUrl) => this.addImage(dataUrl));
-		const resultPromise = new Promise<{ ok: boolean; error?: string; durationMs: number; kind: "result" }>((resolve) => {
+		this.options.sky.setImageOmissionSink?.((reason, count) => this.omitImages(run, reason, count, true));
+		const resultPromise = new Promise<{ ok: boolean; error?: string; errorInfo?: SerializableError; durationMs: number; kind: "result" }>((resolve) => {
 			run.resolve = (result) => resolve({ ...result, kind: "result" });
 		});
 		let timeoutHandle: NodeJS.Timeout | undefined;
@@ -383,6 +443,8 @@ export class JsKernel {
 		if (signal && abortHandler) signal.removeEventListener("abort", abortHandler);
 		if (this.currentRun === run) this.currentRun = null;
 		if (this.currentRun === null) this.options.sky.setImageSink(undefined);
+		if (this.currentRun === null) this.options.sky.setImageOmissionSink?.(undefined);
+		const details = { imageReport: run.imageReport, actions: run.actions.map((action) => ({ ...action })), actionsTruncated: run.actionsTruncated };
 		if (outcome.kind === "timeout" || outcome.kind === "aborted") {
 			const reason = outcome.kind === "timeout"
 				? `JavaScript execution timed out after ${clampedTimeout}ms; the Computer Use session was reset`
@@ -394,6 +456,8 @@ export class JsKernel {
 			return {
 				ok: false,
 				error: reason,
+				errorInfo: serializeError(reason, { code: outcome.kind === "timeout" ? "JS_TIMEOUT" : "CANCELLED", action_sent: run.actions.some((action) => action.status === "possibly_sent") ? "possibly_sent" : run.actions.some((action) => action.status === "sent") ? "sent" : "not_sent", retry: outcome.kind === "aborted" ? "never" : "reobserve", session_reset: true }),
+				...details,
 				durationMs: Date.now() - started,
 				output: { text: [run.text.value()].filter(Boolean), images: run.images },
 				timedOut: outcome.kind === "timeout",
@@ -403,14 +467,28 @@ export class JsKernel {
 		return {
 			ok: outcome.ok,
 			error: outcome.error,
+			errorInfo: outcome.errorInfo,
+			...details,
 			durationMs: outcome.durationMs,
 			output: { text: [run.text.value()].filter(Boolean), images: run.images },
 		};
 	}
 
 	async reset(): Promise<void> {
+		const reason = "Computer Use JavaScript session was reset";
+		const run = this.currentRun;
 		this.epoch += 1;
+		this.finishRun({
+			ok: false, error: reason, durationMs: 0,
+			errorInfo: serializeError(reason, {
+				code: "CANCELLED", retry: "never", session_reset: true,
+				action_sent: run?.actions.some(action => action.status === "possibly_sent") ? "possibly_sent"
+					: run?.actions.some(action => action.status === "sent") ? "sent" : "not_sent",
+			}),
+		});
+		this.options.sky.abort(reason);
 		this.options.sky.setImageSink(undefined);
+		this.options.sky.setImageOmissionSink?.(undefined);
 		await this.terminateWorker();
 	}
 

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { after, describe, test } from "node:test";
@@ -9,6 +9,8 @@ import {
 	defaultStateRoot,
 	effectiveDenyApps,
 	loadConfig,
+	readConfigList,
+	updateConfigList,
 } from "../dist/config.js";
 
 const tempDirs = [];
@@ -66,6 +68,26 @@ describe("config", () => {
 		assert.ok(DEFAULT_DENY_APPS.includes("windowsterminal.exe"));
 	});
 
+	test("rejects misspelled keys instead of silently removing restrictions", async () => {
+		const stateRoot = await tempDir("cua-config-unknown-");
+		await writeFile(path.join(stateRoot, "config.json"), JSON.stringify({ approval: "mcp", allowApp: ["notepad.exe"] }));
+		await assert.rejects(() => loadConfig(stateRoot), error => {
+			assert.equal(error.code, "CONFIG_ERROR");
+			assert.match(error.message, /allowApp/);
+			assert.match(error.message, /allowApps/);
+			return true;
+		});
+	});
+
+	test("partial configurations retain defaults for omitted keys", async () => {
+		const stateRoot = await tempDir("cua-config-partial-");
+		await writeFile(path.join(stateRoot, "config.json"), JSON.stringify({allowApps: ["notepad.exe"]}));
+		const config = await loadConfig(stateRoot);
+		assert.deepEqual(config.allowApps, ["notepad.exe"]);
+		assert.equal(config.approval, "auto");
+		assert.equal(config.verifySignatures, true);
+	});
+
 	test("rejects malformed JSON", async () => {
 		const stateRoot = await tempDir("cua-config-invalid-");
 		await writeFile(path.join(stateRoot, "config.json"), "{not json");
@@ -89,5 +111,49 @@ describe("config", () => {
 			if (previous === undefined) delete process.env.CODEX_COMPUTER_USE_HOME;
 			else process.env.CODEX_COMPUTER_USE_HOME = previous;
 		}
+	});
+});
+
+describe("allow list editing", () => {
+	test("add creates the file and deduplicates case-insensitively", async () => {
+		const stateRoot = await tempDir("cua-allow-add-");
+		const result = await updateConfigList(stateRoot, "allowApps", "add", ["chrome.exe", "Chrome.EXE"]);
+		assert.deepEqual(result.list, ["chrome.exe"]);
+		assert.deepEqual(result.changed, ["chrome.exe"]);
+		const file = JSON.parse(await readFile(configPath(stateRoot), "utf8"));
+		assert.deepEqual(file, {allowApps: ["chrome.exe"]});
+		const listed = await readConfigList(stateRoot, "allowApps");
+		assert.deepEqual(listed, ["chrome.exe"]);
+	});
+
+	test("add preserves unrelated keys already in the file", async () => {
+		const stateRoot = await tempDir("cua-allow-preserve-");
+		await writeFile(configPath(stateRoot), JSON.stringify({approval: "mcp", denyApps: ["slack.exe"]}));
+		await updateConfigList(stateRoot, "allowApps", "add", ["notepad.exe"]);
+		const file = JSON.parse(await readFile(configPath(stateRoot), "utf8"));
+		assert.deepEqual(file, {approval: "mcp", denyApps: ["slack.exe"], allowApps: ["notepad.exe"]});
+	});
+
+	test("remove deletes exact entries only", async () => {
+		const stateRoot = await tempDir("cua-allow-remove-");
+		await updateConfigList(stateRoot, "allowApps", "add", ["chrome.exe", "notepad.exe"]);
+		const result = await updateConfigList(stateRoot, "allowApps", "remove", ["chrome.exe"]);
+		assert.deepEqual(result.list, ["notepad.exe"]);
+		assert.deepEqual(result.changed, ["chrome.exe"]);
+		const missing = await updateConfigList(stateRoot, "allowApps", "remove", ["chrome.exe"]);
+		assert.deepEqual(missing.changed, []);
+	});
+
+	test("refuses to write when the existing file is invalid", async () => {
+		const stateRoot = await tempDir("cua-allow-invalid-");
+		await writeFile(configPath(stateRoot), JSON.stringify({allowApp: ["notepad.exe"]}));
+		await assert.rejects(() => updateConfigList(stateRoot, "allowApps", "add", ["chrome.exe"]), error => error.code === "CONFIG_ERROR");
+		const file = JSON.parse(await readFile(configPath(stateRoot), "utf8"));
+		assert.deepEqual(file, {allowApp: ["notepad.exe"]});
+	});
+
+	test("rejects empty entries", async () => {
+		const stateRoot = await tempDir("cua-allow-empty-");
+		await assert.rejects(() => updateConfigList(stateRoot, "allowApps", "add", ["  "]), error => error.code === "CONFIG_ERROR");
 	});
 });
