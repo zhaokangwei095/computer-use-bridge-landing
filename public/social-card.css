@@ -1,0 +1,5 @@
+.social-wrap{padding:64px 80px;inline-size:1200px;block-size:630px;display:flex;flex-direction:column;background:var(--paper)}
+.social-wrap .brand-mark{inline-size:40px;block-size:40px;margin-inline-end:8px}
+.social-wrap .eyebrow{margin-block:64px 24px}
+.social-wrap h1{font-size:4.5rem;line-height:1;letter-spacing:-.045em;margin-block-end:24px}
+.social-footer{display:flex;justify-content:space-between;color:var(--muted);margin-block-start:auto;padding-block-start:24px;border-block-start:1px solid var(--line)}
