@@ -10,6 +10,8 @@ import type {
 import { HelperError } from "./errors.ts";
 import { Observations } from "./observations.ts";
 import { desktopSchemas } from "./desktop-tools.ts";
+import { NativeComputerUseBrowser } from "./native-browser.ts";
+import type { BrowserTool } from "./browser-tools.ts";
 
 export interface SkyOptions {
 	helper: HelperClient;
@@ -153,9 +155,13 @@ function assertLaunchTarget(app: string): void {
 export class Sky {
 	readonly target = "windows" as const;
 	private readonly observations = new Observations(this);
+	private readonly browser = new NativeComputerUseBrowser(this);
+	async browserAction(name: BrowserTool, input: unknown) { return this.browser.execute(name, input); }
 	invalidateObservations(reset = false): void { this.observations.invalidate(reset); }
 	async observe_window(input: unknown) { return this.observations.observe(desktopSchemas.observe_window.parse(input)); }
 	async click_element(input: unknown) { return this.observations.act("click", desktopSchemas.click_element.parse(input)); }
+	async click_screenshot_point(input: unknown) { return this.observations.clickScreenshot(desktopSchemas.click_screenshot_point.parse(input)); }
+	async type_text_observed(input: unknown) { return this.observations.typeText(desktopSchemas.type_text_observed.parse(input)); }
 	async set_value_observed(input: unknown) { return this.observations.act("set", desktopSchemas.set_value.parse(input)); }
 	private readonly helper: HelperClient;
 	private readonly onImage?: (dataUrl: string) => void;
@@ -369,6 +375,7 @@ export class Sky {
 	}
 
 	abort(reason?: string): void {
+		this.browser.cancel();
 		this.invalidateObservations(true);
 		this.helper.abort(reason);
 	}

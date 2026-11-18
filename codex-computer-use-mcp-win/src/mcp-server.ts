@@ -24,6 +24,9 @@ import { desktopToolDefinitions, desktopToolCode, isDesktopTool } from "./deskto
 import { clientConfiguration } from "./cli-support.ts";
 import { configPath, defaultStateRoot, readConfigList, updateConfigList } from "./config.ts";
 import { serializeError } from "./error-envelope.ts";
+import { browserToolDefinitions, isBrowserTool } from "./browser-tools.ts";
+import { CodexComputerUseBrowser } from "./codex-browser.ts";
+import { dispatchBrowser } from "./browser-dispatch.ts";
 
 const USAGE = `Usage: codex-computer-use-mcp-win [--status | --version | --help]
        codex-computer-use-mcp-win print-config --client qoder|dsh|generic
@@ -95,7 +98,7 @@ async function main(): Promise<void> {
 		try {
 			const status = await session.status();
 			const live = args.includes("--live") && status.ready ? await session.execute("js", {code: "nodeRepl.write(JSON.stringify({windowCount:(await sky.list_windows()).length}));"}) : null;
-			report = {discovery: status, liveProbe: live, interactiveClient: "not_tested", mcpHandshake: "not_tested", appApproval: "not_tested", tools: [...CUA_TOOL_DEFINITIONS, STATUS_TOOL_DEFINITION, ...desktopToolDefinitions()].map(tool => tool.name)};
+			report = {discovery: status, liveProbe: live, interactiveClient: "not_tested", mcpHandshake: "not_tested", appApproval: "not_tested", browserDomainPolicy: "unrestricted-http-https", tools: [...CUA_TOOL_DEFINITIONS, STATUS_TOOL_DEFINITION, ...desktopToolDefinitions(), ...browserToolDefinitions()].map(tool => tool.name)};
 			exitCode = status.ready && !live?.isError ? 0 : 1;
 		} finally { await session.close(); }
 		printAndExit(JSON.stringify(report, null, 2), exitCode);
@@ -126,6 +129,7 @@ async function main(): Promise<void> {
 		{ name: "codex-computer-use-mcp-win", version: PACKAGE_VERSION },
 		serverOptions,
 	);
+	const codexBrowser = new CodexComputerUseBrowser();
 	const session = new ComputerUseSession({
 		onElicitation: (request, options) => requestApprovalFromMcpClient(
 			{ elicitInput: (params, requestOptions) => server.elicitInput(params, requestOptions) },
@@ -140,11 +144,14 @@ async function main(): Promise<void> {
 		await session.close().catch((error) => {
 			console.error(`[computer-use] close failed: ${error instanceof Error ? error.message : String(error)}`);
 		});
+		await codexBrowser.close().catch((error) => {
+			console.error(`[browser] close failed: ${error instanceof Error ? error.message : String(error)}`);
+		});
 	};
 	server.onclose = () => { void close(); };
 
 	server.setRequestHandler(ListToolsRequestSchema, () => Promise.resolve({
-		tools: [...CUA_TOOL_DEFINITIONS, STATUS_TOOL_DEFINITION, ...desktopToolDefinitions()],
+		tools: [...CUA_TOOL_DEFINITIONS, STATUS_TOOL_DEFINITION, ...desktopToolDefinitions(), ...browserToolDefinitions()],
 	}));
 
 	server.setRequestHandler(CallToolRequestSchema, async (request, extra): Promise<CallToolResult> => {
@@ -156,7 +163,11 @@ async function main(): Promise<void> {
 				structuredContent: status as unknown as Record<string, unknown>,
 			};
 		}
-		if (!isCuaReplTool(name) && !isDesktopTool(name)) throw new McpError(ErrorCode.InvalidParams, `Unknown tool: ${name}`);
+		if (isBrowserTool(name)) {
+			const response = await dispatchBrowser(name, request.params.arguments ?? {}, session, codexBrowser, extra.signal);
+			return { ...response, content: response.content as CallToolResult["content"] };
+		}
+		if (!isCuaReplTool(name) && !isDesktopTool(name) && !isBrowserTool(name)) throw new McpError(ErrorCode.InvalidParams, `Unknown tool: ${name}`);
 		try {
 			const args = z.record(z.string(), z.json()).parse(request.params.arguments ?? {}) as JsonObject;
 			const response = isDesktopTool(name)

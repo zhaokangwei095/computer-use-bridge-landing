@@ -107,7 +107,7 @@ test("serializes transport evidence conservatively and does not invoke error get
 });
 
 test("session exposes structured failure and image omissions without logging content", async () => {
-	const session = new ComputerUseSession();
+	const session = new ComputerUseSession({restoreCursor: async () => true});
 	const kernel = fixture({kernel: {maxTotalImageBytes: 1}});
 	const records = [];
 	session.config = {sessionIdleMs: 60000, audit: false};

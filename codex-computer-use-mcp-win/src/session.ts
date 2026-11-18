@@ -13,6 +13,8 @@ import { Sky } from "./sky.ts";
 import { CUA_REPL_TOOLS, type CuaReplTool, type JsonObject } from "./tools.ts";
 import { PACKAGE_VERSION } from "./version.ts";
 import { desktopToolDefinitions } from "./desktop-tools.ts";
+import { browserToolDefinitions } from "./browser-tools.ts";
+import { restoreSystemCursors } from "./cursor-recovery.ts";
 
 export type ContentBlock = {
 	type: "text";
@@ -33,6 +35,7 @@ export interface SessionOptions {
 	stateRoot?: string;
 	onElicitation?: (request: HelperApprovalRequest, options?: RequestOptions) => Promise<ApprovalDecision>;
 	logger?: (message: string) => void;
+	restoreCursor?: (reason: string) => Promise<boolean>;
 }
 
 interface StatusShape {
@@ -58,6 +61,7 @@ interface StatusShape {
 	warnings: string[];
 	jsRunning: boolean;
 	jsError: string | null;
+	cursorRecovery: "windows-spi-setcursors";
 }
 
 function imageBlock(dataUrl: string): ContentBlock | undefined {
@@ -81,6 +85,7 @@ export class ComputerUseSession {
 	private readonly stateRoot: string;
 	private readonly onElicitation?: SessionOptions["onElicitation"];
 	private readonly logger: (message: string) => void;
+	private readonly restoreCursor: (reason: string) => Promise<boolean>;
 	private config: AppConfig | null = null;
 	private configError: string | null = null;
 	private installation: Installation | null = null;
@@ -99,6 +104,7 @@ export class ComputerUseSession {
 		this.stateRoot = options.stateRoot ?? defaultStateRoot();
 		this.onElicitation = options.onElicitation;
 		this.logger = options.logger ?? ((message) => console.error(message));
+		this.restoreCursor = options.restoreCursor ?? restoreSystemCursors;
 	}
 
 	private log(message: string): void {
@@ -156,6 +162,7 @@ export class ComputerUseSession {
 			this.approval = ApprovalController.fromConfig(config, { elicit: this.onElicitation });
 		}
 		if (!this.helper) {
+			await this.restoreCursor("before-helper-start").catch(() => false);
 			this.helper = new HelperClient({
 				helperPath: installation.helperPath,
 				codexPath: installation.codexPath,
@@ -164,6 +171,7 @@ export class ComputerUseSession {
 				approval: this.approval,
 				logger: this.logger,
 				onExit: () => this.sky?.invalidateObservations(true),
+				restoreCursor: this.restoreCursor,
 			});
 		}
 		if (!this.sky) {
@@ -246,6 +254,7 @@ export class ComputerUseSession {
 		if (tool === "js_reset") {
 			try {
 				await this.kernel?.reset();
+				await this.restoreCursor("js-reset").catch(() => false);
 				await this.audit({
 					runId,
 					method: "js_reset",
@@ -303,6 +312,7 @@ export class ComputerUseSession {
 			return { isError: true, content: [{ type: "text", text: errorMessage(error) }], structuredContent: { error: serializeError(error, { action_sent: "not_sent" }) } };
 		}
 		const result = await runtime.kernel.run(code, timeoutMs, options.signal);
+		void this.restoreCursor("execution-finished").catch(() => false);
 		const failure = result.ok ? null : result.errorInfo ?? serializeError(result.error ?? "Execution failed");
 		const content: ContentBlock[] = [];
 		for (const text of result.output.text) {
@@ -371,7 +381,7 @@ export class ComputerUseSession {
 			configPath: configPath(this.stateRoot),
 			permissionMode: "helper-approval",
 			approval: this.config?.approval ?? "auto",
-			tools: [...CUA_REPL_TOOLS, "computer_use_status", ...desktopToolDefinitions().map(tool => tool.name)],
+			tools: [...CUA_REPL_TOOLS, "computer_use_status", ...desktopToolDefinitions().map(tool => tool.name), ...browserToolDefinitions().map(tool => tool.name)],
 			ready: false,
 			error: null,
 			helperRunning: this.helper?.isRunning ?? false,
@@ -386,6 +396,7 @@ export class ComputerUseSession {
 			warnings: this.installation?.warnings ?? [],
 			jsRunning: this.kernel?.isRunning ?? false,
 			jsError: this.kernel?.error ?? null,
+			cursorRecovery: "windows-spi-setcursors",
 		};
 		try {
 			await this.ensureConfig();
@@ -421,6 +432,7 @@ export class ComputerUseSession {
 		}
 		await this.kernel?.close().catch(() => undefined);
 		await this.sky?.close().catch(() => undefined);
+		await this.restoreCursor("session-close").catch(() => false);
 		this.helper = null;
 		this.sky = null;
 		this.kernel = null;

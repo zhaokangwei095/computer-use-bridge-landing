@@ -26,7 +26,7 @@ before(async () => {
 	transport = new StdioClientTransport({
 		command: process.execPath,
 		args: [serverPath],
-		env: { ...process.env, CODEX_COMPUTER_USE_HOME: stateRoot },
+		env: { ...process.env, CODEX_THREAD_ID: "", CODEX_SESSION_ID: "", CODEX_TOOL_CALL_ID: "", CODEX_COMPUTER_USE_HOME: stateRoot },
 		cwd: stateRoot,
 		stderr: "pipe",
 	});
@@ -41,9 +41,16 @@ after(async () => {
 });
 
 describe("MCP server", () => {
+	test("third-party browser calls accept native selectors and reach native discovery without Codex context", async () => {
+		const result = await client.callTool({name:"browser_open",arguments:{app:"MSEdge",window_id:67480,url:"https://example.com"}});
+		assert.equal(result.isError,true);
+		assert.equal(result.structuredContent.backend,"native-window");
+		assert.equal(result.structuredContent.error.code,"DISCOVERY_FAILED");
+		assert.doesNotMatch(JSON.stringify(result),/requires Codex turn context/);
+	});
 	test("lists the Computer Use tools in order", async () => {
 		const result = await client.listTools();
-		assert.deepEqual(result.tools.map((tool) => tool.name), ["js", "js_reset", "computer_use_status", "list_windows", "observe_window", "click_element", "set_value"]);
+		assert.deepEqual(result.tools.map((tool) => tool.name), ["js", "js_reset", "computer_use_status", "list_windows", "observe_window", "click_element", "click_screenshot_point", "type_text_observed", "set_value", "browser_open", "browser_new_tab", "browser_tabs", "browser_navigate", "browser_read"]);
 		const js = result.tools[0];
 		assert.equal(js.inputSchema.required[0], "code");
 		assert.equal(js.annotations.destructiveHint, true);

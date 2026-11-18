@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, describe, test } from "node:test";
 import { ApprovalController } from "../dist/approval.js";
-import { HelperClient, minimalHelperEnv } from "../dist/helper-client.js";
+import { HelperClient, codexRequestMetadata, minimalHelperEnv } from "../dist/helper-client.js";
 import { serializeError } from "../dist/error-envelope.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -30,6 +30,7 @@ async function makeClient(options = {}) {
 	const root = options.root ?? await tempDir("cua-helper-");
 	const codexHome = path.join(root, "codex-home");
 	const logPath = options.logPath ?? path.join(root, "requests.jsonl");
+	const restoreCalls = [];
 	const client = new HelperClient({
 		helperPath: process.execPath,
 		helperArgs: [fakeHelper],
@@ -47,9 +48,10 @@ async function makeClient(options = {}) {
 			...options.env,
 		},
 		logger: () => undefined,
+		restoreCursor: async reason => { restoreCalls.push(reason); return true; },
 	});
 	clients.push(client);
-	return { client, root, logPath };
+	return { client, root, logPath, restoreCalls };
 }
 
 async function readLog(logPath) {
@@ -58,6 +60,15 @@ async function readLog(logPath) {
 }
 
 describe("minimalHelperEnv", () => {
+	test("builds current-turn metadata without exposing it elsewhere", () => {
+		assert.deepEqual(codexRequestMetadata({
+			CODEX_THREAD_ID: "thread-test",
+			CODEX_SESSION_ID: "session-test",
+			CODEX_TOOL_CALL_ID: "turn-test",
+		}), {"x-codex-turn-metadata": {thread_id: "thread-test", session_id: "session-test", turn_id: "turn-test"}});
+		assert.deepEqual(codexRequestMetadata({}), {});
+	});
+
 	test("drops secrets and unrelated environment variables", () => {
 		const env = minimalHelperEnv({
 			SystemRoot: "C:\\Windows",
@@ -115,7 +126,9 @@ describe("HelperClient protocol", () => {
 	});
 	test("spawns with a sanitized environment and speaks JSONL", async () => {
 		const previousSecret = process.env.CUA_TEST_SECRET;
+		const previousGrant = process.env.BROWSER_USE_ACCESS_EXECUTOR_ID;
 		process.env.CUA_TEST_SECRET = "must-not-leak";
+		process.env.BROWSER_USE_ACCESS_EXECUTOR_ID = "browser-grant-for-test";
 		const { client, logPath } = await makeClient();
 		try {
 			const apps = await client.listApps();
@@ -131,12 +144,15 @@ describe("HelperClient protocol", () => {
 			assert.equal(log[0].envSubset.SKY_ENABLE_AUDIO, "0");
 			assert.equal(log[0].envSubset.SKY_CUA_NATIVE_PIPE_DIRECTORY, undefined);
 			assert.equal(log[0].envKeys.includes("CUA_TEST_SECRET"), false);
+			assert.equal(log[0].envKeys.includes("BROWSER_USE_ACCESS_EXECUTOR_ID"), true);
 			assert.equal(log[0].envKeys.includes("CODEX_HOME"), true);
 			assert.equal(log[0].argv.includes("--parent-pid"), true);
 			assert.equal(log[0].argv.includes(fakeHelper), true);
 		} finally {
 			if (previousSecret === undefined) delete process.env.CUA_TEST_SECRET;
 			else process.env.CUA_TEST_SECRET = previousSecret;
+			if (previousGrant === undefined) delete process.env.BROWSER_USE_ACCESS_EXECUTOR_ID;
+			else process.env.BROWSER_USE_ACCESS_EXECUTOR_ID = previousGrant;
 		}
 	});
 
@@ -209,7 +225,7 @@ describe("HelperClient protocol", () => {
 				window: { app: "MSEdge", id: 303, title: "Microsoft Edge" },
 				include_screenshot: true,
 			}),
-			(error) => error.code === "HELPER_ERROR" && /official Windows helper.*official node_repl Browser Service/.test(error.message),
+			(error) => error.code === "HELPER_ERROR" && /no domain allowlist.*does not bypass that helper policy/.test(error.message),
 		);
 	});
 
@@ -233,7 +249,7 @@ describe("HelperClient protocol", () => {
 	});
 
 	test("times out a slow request and kills the helper", async () => {
-		const { client } = await makeClient({
+		const { client, restoreCalls } = await makeClient({
 			timeoutMs: 150,
 			env: { FAKE_HELPER_SLOW_MS: "1000" },
 		});
@@ -241,6 +257,7 @@ describe("HelperClient protocol", () => {
 			() => client.listWindows(),
 			(error) => error.code === "HELPER_TIMEOUT" && /timed out/.test(error.message),
 		);
+		assert.ok(restoreCalls.includes("helper-timeout"));
 	});
 
 	test("abort rejects an in-flight request", async () => {
@@ -252,11 +269,12 @@ describe("HelperClient protocol", () => {
 	});
 
 	test("close sends the close method and shuts down", async () => {
-		const { client, logPath } = await makeClient();
+		const { client, logPath, restoreCalls } = await makeClient();
 		await client.listApps();
 		await client.close();
 		const log = await readLog(logPath);
 		assert.equal(log.at(-1).method, "close");
 		assert.equal(client.isRunning, false);
+		assert.ok(restoreCalls.includes("helper-close") || restoreCalls.includes("helper-exit"));
 	});
 });

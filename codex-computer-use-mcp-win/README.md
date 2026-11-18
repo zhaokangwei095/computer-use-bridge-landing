@@ -116,6 +116,74 @@ Restart the client after changing the configuration.
 
 ## Tools
 
+### Browser access permission
+
+The browser tools intentionally have **no website domain allowlist or
+denylist**. They may navigate to local, private and authenticated HTTP(S)
+pages and return exposed page text to the calling agent. Application approval,
+the native helper's URL verification, Windows and browser protections still
+apply. Tool results and page contents can contain sensitive information.
+
+`app` and `window_id` are supported again. WorkBuddy, Qoder and DSH do not
+need Codex session environment variables for the native browser window route.
+All native operations use the existing signed helper, through the same
+serialized `js` execution, approval, timeout and cancellation path.
+
+| Request | Route selected before execution |
+| --- | --- |
+| Contains `app` or `window_id` | Native Windows Computer Use, even inside Codex |
+| No native target and no Codex context | Native Windows Computer Use; defaults to `MSEdge` |
+| No native target, Codex context present | Official Computer Use in-app browser |
+| Contains `tab_id` or `read_all: true`, but lacks official context | Explicit error; tab IDs are never treated as window IDs |
+
+No route is retried through another backend after a failure or denial. The
+official route preserves the host's browser-access verification environment.
+Presence of context variables is only a routing hint, not proof of permission.
+Do not copy another chat's IDs, substitute a tool-call ID for a turn ID, or
+invent session IDs to make a third-party client appear authorized.
+
+For native windows, use IDs returned by `list_windows`. If several windows
+match, provide `window_id`. A missing ID or app mismatch fails before input;
+the bridge never silently selects a different window.
+
+```json
+{
+  "app": "MSEdge",
+  "window_id": 67480,
+  "url": "https://example.com",
+  "reuse_existing": false
+}
+```
+
+The window ID above is illustrative; use a fresh ID on your machine.
+`browser_open` creates a tab unless `reuse_existing: true` is supplied, which
+navigates the current tab. `browser_navigate` always navigates the selected
+window's current tab. `browser_new_tab` permits an omitted URL.
+
+`browser_read` and `browser_tabs` do not launch or activate native windows.
+They read the selected window's accessibility text. `browser_tabs` marks
+`complete_tab_inventory: false`: it does not claim to enumerate or read
+background tabs, and `read_all` is not supported for native windows.
+
+Native results include `backend: "native-window"`, `navigation_sent`,
+`new_tab_sent`, `navigation_verified: false`, `accessibility_status`, `text`,
+and a structured error when applicable. Sent navigation is only input
+acknowledgment, not verified page loading. If navigation was sent but
+`get_window_state` is rejected, the MCP result has **`isError: true`** and
+retains `navigation_sent: true`. The same facts appear in text content for
+clients that hide structured results.
+
+**Known limit:** restoring the native route fixes third-party connection and
+target compatibility; it does not fix the upstream helper error
+“could not verify whether the current browser URL is allowed”. That denial
+still stops the call. An empty accessibility tree is reported as unavailable,
+not successful reading. The bridge does not use CDP, page fetching, another
+browser or repeated navigation to work around a helper denial.
+
+Official in-app calls keep `tab_id` support and require an authorized host
+session and a usable official browser runtime. That route was tested inside
+Codex; it is not a general WorkBuddy browser-reading solution.
+
 ### Structured desktop tools (preview)
 
 `list_windows` lists windows. `observe_window` accepts a `window` descriptor
@@ -130,6 +198,44 @@ also requires `value`. `observe_after` defaults to true. Results distinguish
 `action.action_sent` from `observation.status`; a successful action followed
 by failed observation must not be replayed. `verified: false` means the bridge
 has not determined whether the user's intended UI change occurred.
+
+When an application exposes no accessibility tree, `observe_window` returns
+`accessibility_available: false`, `interaction_mode: "screenshot"` and
+`recommended_tool: "click_screenshot_point"` after a screenshot observation.
+Use `click_screenshot_point` with the same `window`, `snapshot_id`,
+`session_epoch`, `screenshot_id`, and pixel coordinates from that screenshot.
+The coordinates refer to the referenced screenshot; the helper performs the
+coordinate mapping. The action result uses `verification_mode: "screenshot"`.
+This is a valid visual fallback, but it is not accessibility-text readback.
+`type_text_observed` sends literal text into the currently focused control
+using the same observation provenance, so the screenshot path does not require
+hand-written JavaScript.
+
+```js
+const view = await sky.observe_window({ window, screenshot: true })
+const clicked = await sky.click_screenshot_point({
+  window,
+  snapshot_id: view.snapshot_id,
+  session_epoch: view.session_epoch,
+  screenshot_id: view.screenshots[0].id,
+  x: 205,
+  y: 447,
+  observe_after: true,
+})
+const afterClick = clicked.observation
+await sky.type_text_observed({
+  window,
+  snapshot_id: afterClick.snapshot_id,
+  session_epoch: afterClick.session_epoch,
+  text: "MCP 测试成功\n中文输入：你好，Windows！",
+  observe_after: true,
+})
+```
+
+Some UWP applications, including tested Calculator and Notepad builds, return
+`accessibility: null` through the installed helper. Element tools are then
+unavailable by design; use the screenshot-coordinate path instead of inventing
+element indexes.
 
 Any observation or mutation conservatively invalidates all earlier structured
 references in the server. `js_reset`, idle abort, and helper exit invalidate
@@ -235,21 +341,12 @@ await app.pressKey("Return");
 `cua.createBrowserTab()` explicitly report that browser tab control is not
 available in this Windows adapter.
 
-For browser work in DSH, run the official `node_repl` Browser Service as a
-separate MCP in the same agent session. Keep `NODE_REPL_TRUSTED_SERVICES` mapped
-to `@oai/browser-desktop/service` and `@oai/sky/service`, with
-`NODE_REPL_NODE_MODULE_DIRS` and `NODE_REPL_NODE_PATH` aligned to the same
-installed `cua_node` runtime. To expose the documented browser surface, allow
-`CUA_REPL_ENABLED_SURFACES=browser` through `nodeRepl.env`, then run
-`await import("@oai/cua/tinyskyAlt")` once in each fresh worker. Use
-`cua.getState()` / `cua.listTabs()` to inspect inventory, then
-`cua.getTab()` / `cua.createBrowserTab()` for browser tabs and URLs; verify with
-`tab.url()`. Hosts that inject `agent` also expose the underlying
-`agent.browsers` and `browser.tabs` APIs. The Browser Service still requires the
-authorized host session context; if DSH cannot provide it and inventory access is
-denied, do not fabricate context or infer URLs from UI. Reload the DSH MCP
-configuration after environment changes. The browser service has its own URL/tab
-context and JavaScript session, separate from this Windows helper's `js` session.
+Low-level `cua.listTabs()` and `cua.createBrowserTab()` remain unavailable
+because this Windows helper does not expose that facade. Use the high-level
+`browser_*` tools above instead. They stay inside Computer Use and do not add a
+second browser transport. A separately configured official Browser Service may
+still be used by a client that needs its richer Browser API, but it is not
+required for the bridge's unrestricted webpage opening/read workflow.
 
 ### Execution results and output budgets
 
@@ -405,6 +502,22 @@ the idle timeout.
 
 ## Troubleshooting
 
+### Mouse pointer remains invisible after Computer Use
+
+The bridge reloads the **currently selected Windows cursor scheme** after
+Computer Use execution, before helper startup, and after clean close, abort,
+timeout, helper exit, and MCP shutdown. The implementation calls
+`SystemParametersInfoW(SPI_SETCURSORS)` and does not change the cursor size,
+color, files, or registry values.
+
+This is a workaround for an upstream helper path that can leave a transparent
+system cursor after a Computer Use turn. Cursor recovery is best effort because
+the upstream helper does not expose a cursor-state API and an abruptly killed
+parent can prevent every handler from running. If the pointer is still absent,
+open **Settings → Accessibility → Mouse pointer and touch** and reapply the
+current pointer scheme, or sign out and back in.
+
+
 Run:
 
 ```powershell
@@ -431,9 +544,10 @@ Common cases:
   if it lacks authorized host session context, stop and surface that limitation
   instead of retrying through UIA or screenshots.
 - **User input was detected** — call `get_window_state` again before acting.
-- **Accessibility is null** — some Electron apps (including VS Code in testing)
-  do not expose a UIA tree. Screenshots still work; use coordinates or another
-  automation surface.
+- **Accessibility is null** — some Electron and UWP apps do not expose a usable
+  UIA tree through the installed helper. Screenshots still work; use
+  `observe_window({ screenshot: true })` followed by
+  `click_screenshot_point`, or another automation surface.
 - **Approval denied** — the app is denied, not on the allow list, or the MCP
   client declined. Check `config.json`.
 - **Signature invalid** — reinstall/update ChatGPT. If you intentionally use a

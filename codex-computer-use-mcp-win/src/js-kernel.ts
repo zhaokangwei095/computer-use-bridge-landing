@@ -346,8 +346,15 @@ export class JsKernel {
 		const sky = this.options.sky;
 		switch (method) {
 			case "sky.list_apps": return await sky.list_apps();
+			case "sky.browser_open": return await sky.browserAction("browser_open", args[0]);
+			case "sky.browser_new_tab": return await sky.browserAction("browser_new_tab", args[0]);
+			case "sky.browser_navigate": return await sky.browserAction("browser_navigate", args[0]);
+			case "sky.browser_tabs": return await sky.browserAction("browser_tabs", args[0]);
+			case "sky.browser_read": return await sky.browserAction("browser_read", args[0]);
 			case "sky.observe_window": return await sky.observe_window(args[0]);
 			case "sky.click_element": return await sky.click_element(args[0]);
+			case "sky.click_screenshot_point": return await sky.click_screenshot_point(args[0]);
+			case "sky.type_text_observed": return await sky.type_text_observed(args[0]);
 			case "sky.set_value_observed": return await sky.set_value_observed(args[0]);
 			case "sky.list_windows": return await sky.list_windows();
 			case "sky.get_window": return await sky.get_window(args[0] as { id: number | string; app?: string });

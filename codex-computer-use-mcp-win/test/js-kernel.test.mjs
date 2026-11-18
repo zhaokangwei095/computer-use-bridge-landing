@@ -264,6 +264,7 @@ describe("sandbox lifecycle", () => {
 		const helper = new HelperClient({
 			helperPath: "unused", codexPath: "unused", codexHome: "unused",
 			approval: new ApprovalController({mode: "auto", fallback: "deny", denyApps: [], allowApps: []}),
+			restoreCursor: async () => true,
 		});
 		helper.sendRaw = async (method, params) => {
 			sent.push(params.element_index);

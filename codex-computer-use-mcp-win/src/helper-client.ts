@@ -5,6 +5,7 @@ import { createInterface, type Interface } from "node:readline";
 import type { ApprovalController, HelperApprovalRequest } from "./approval.ts";
 import { HelperError } from "./errors.ts";
 import { isMutation, withErrorContext } from "./error-envelope.ts";
+import { restoreSystemCursors, restoreSystemCursorsSync } from "./cursor-recovery.ts";
 
 export interface HelperWindow {
 	app: string;
@@ -59,6 +60,7 @@ export interface HelperClientOptions {
 	logger?: (message: string) => void;
 	onEvent?: (event: unknown) => void;
 	onExit?: (error: Error) => void;
+	restoreCursor?: (reason: string) => Promise<boolean>;
 }
 
 const ENV_ALLOWLIST = [
@@ -67,6 +69,10 @@ const ENV_ALLOWLIST = [
 	"LOCALAPPDATA", "APPDATA", "USERPROFILE", "HOMEDRIVE", "HOMEPATH",
 	"USERNAME", "USERDOMAIN", "COMPUTERNAME", "TEMP", "TMP", "COMSPEC", "PATHEXT",
 	"NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "PROCESSOR_IDENTIFIER", "OS",
+	// Official Codex host grants used by the signed helper to verify that its
+	// native browser UI operations target the current, user-authorized page.
+	"BROWSER_USE_ACCESS_EXECUTOR_ID", "BROWSER_USE_ACCESS_PIPE_PATH",
+	"BROWSER_USE_ACCESS_VERIFYING_IDENTITY", "CODEX_WINDOWS_REGISTERED_CORE",
 ] as const;
 
 /**
@@ -106,6 +112,24 @@ type HelperResponse =
 
 const STDERR_TAIL_BYTES = 16 * 1024;
 
+function codexTurnMetadata(source: NodeJS.ProcessEnv = process.env): Record<string, unknown> | undefined {
+	const threadId = source.CODEX_THREAD_ID;
+	const sessionId = source.CODEX_SESSION_ID;
+	const turnId = source.CODEX_TOOL_CALL_ID;
+	if (!threadId || !sessionId || !turnId) return undefined;
+	return {
+		"x-codex-turn-metadata": {
+			thread_id: threadId,
+			session_id: sessionId,
+			turn_id: turnId,
+		},
+	};
+}
+
+export function codexRequestMetadata(source: NodeJS.ProcessEnv = process.env): Record<string, unknown> {
+	return codexTurnMetadata(source) ?? {};
+}
+
 function stripAnsi(value: string): string {
 	return value.replace(/\u001b\[[0-9;]*[A-Za-z]/g, "");
 }
@@ -116,7 +140,7 @@ function errorHint(stderr: string): string {
 		text.includes("browser url") &&
 		(text.includes("confidence") || text.includes("determine"))
 	) {
-		return " The official Windows helper could not verify the browser's current URL and blocked access. This port does not provide browser tab control; use DSH's official node_repl Browser Service through the documented CUA browser surface. If that service denies access because DSH lacks authorized host session context, surface the limitation; do not fabricate context or infer a URL.";
+		return " The browser tools impose no domain allowlist. The official Windows Computer Use helper could not verify the browser's current URL and stopped this operation; this MCP server does not bypass that helper policy. Report the limitation rather than inferring the URL from a title, screenshot or external browser channel.";
 	}
 	if (text.includes("window is minimized") || text.includes("window is not visible")) {
 		return " The window is minimized or hidden. Call sky.activate_window({window}), refresh it with sky.get_window({id, app}), then retry get_window_state.";
@@ -171,6 +195,11 @@ export class HelperClient {
 
 	private log(message: string): void {
 		(this.options.logger ?? ((value) => console.error(value)))(`[computer-use] ${message}`);
+	}
+	private restoreCursor(reason: string): void {
+		void (this.options.restoreCursor ?? restoreSystemCursors)(reason).catch((error) => {
+			this.log(`cursor recovery failed: ${error instanceof Error ? error.message : String(error)}`);
+		});
 	}
 
 	private enqueue<T>(run: () => Promise<T>): Promise<T> {
@@ -244,6 +273,7 @@ export class HelperClient {
 				this.lines = null;
 			}
 			this.failAll(error, false, child);
+			this.restoreCursor("helper-exit");
 			if (!this.closing) this.options.onExit?.(error);
 		});
 		const exitHandler = () => {
@@ -256,6 +286,7 @@ export class HelperClient {
 			} catch {
 				try { child.kill(); } catch { /* ignore */ }
 			}
+			restoreSystemCursorsSync();
 		};
 		this.exitHandler = exitHandler;
 		process.once("exit", exitHandler);
@@ -282,6 +313,7 @@ export class HelperClient {
 			this.lines = null;
 			if (child) {
 				this.killTree(child);
+				this.restoreCursor("helper-protocol-error");
 				if (this.child === child) this.child = null;
 			}
 			return;
@@ -359,6 +391,7 @@ export class HelperClient {
 				this.log(error.message);
 				this.epoch += 1;
 				this.killTree(child);
+				this.restoreCursor("helper-timeout");
 				this.failAll(error, false, child);
 				if (this.child === child) this.child = null;
 				rejectRequest(error);
@@ -366,7 +399,11 @@ export class HelperClient {
 			this.pending.set(id, { resolve, reject: rejectRequest, timeout, method, child });
 			// Always align the helper's own request budget with the client timer.
 			// The official transport overwrites this value on every request.
-			const requestMeta = { ...(meta ?? {}), "x-oai-cua-request-budget-ms": timeoutMs };
+			const requestMeta = {
+				...codexRequestMetadata(),
+				...(meta ?? {}),
+				"x-oai-cua-request-budget-ms": timeoutMs,
+			};
 			const request = { id, method, params, meta: requestMeta };
 			child.stdin.write(`${JSON.stringify(request)}\n`, "utf8", (error) => {
 				if (!error) return;
@@ -533,6 +570,7 @@ export class HelperClient {
 		});
 		if (child.exitCode === null && child.signalCode === null) this.killTree(child);
 		if (this.child === child) this.child = null;
+		this.restoreCursor("helper-close");
 	}
 
 	/** Kill the current helper and reject in-flight requests, but allow a later request to start a new helper. */
@@ -543,6 +581,7 @@ export class HelperClient {
 		this.failAll(error, false, child ?? undefined);
 		if (child) this.killTree(child);
 		if (this.child === child) this.child = null;
+		this.restoreCursor("helper-abort");
 	}
 
 	private killTree(child = this.child): void {

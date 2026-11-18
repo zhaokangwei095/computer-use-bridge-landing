@@ -300,8 +300,15 @@ function installGlobals(): void {
 	});
 	defineGlobal("__scope", scope);
 	const sky = Object.freeze({
+		browser_open: (input: unknown): Promise<unknown> => rpc("sky.browser_open", [input]),
+		browser_new_tab: (input: unknown): Promise<unknown> => rpc("sky.browser_new_tab", [input]),
+		browser_navigate: (input: unknown): Promise<unknown> => rpc("sky.browser_navigate", [input]),
+		browser_tabs: (input: unknown): Promise<unknown> => rpc("sky.browser_tabs", [input]),
+		browser_read: (input: unknown): Promise<unknown> => rpc("sky.browser_read", [input]),
 		observe_window: (input: unknown): Promise<unknown> => rpc("sky.observe_window", [input]),
 		click_element: (input: unknown): Promise<unknown> => rpc("sky.click_element", [input]),
+		click_screenshot_point: (input: unknown): Promise<unknown> => rpc("sky.click_screenshot_point", [input]),
+		type_text_observed: (input: unknown): Promise<unknown> => rpc("sky.type_text_observed", [input]),
 		set_value_observed: (input: unknown): Promise<unknown> => rpc("sky.set_value_observed", [input]),
 		target: "windows",
 		list_apps: (): Promise<unknown> => rpc("sky.list_apps", []),

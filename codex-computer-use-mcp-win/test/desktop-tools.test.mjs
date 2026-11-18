@@ -110,6 +110,86 @@ test("does not create actionable refs without a tree or retry permission failure
 	assert.equal(calls.length, 0);
 });
 
+test("recommends and executes screenshot-coordinate fallback without accessibility", async () => {
+	const {sky, helper, calls} = fixture();
+	const png = "data:image/png;base64,AA==";
+	helper.getWindowState = async input => ({
+		window: input.window,
+		screenshots: [{id: "screenshot-0", zIndex: 0, url: png, width: 323, height: 534, originX: 10, originY: 20}],
+		accessibility: null,
+	});
+	const observation = await sky.observe_window({window, screenshot: true});
+	assert.equal(observation.accessibility_available, false);
+	assert.equal(observation.interaction_mode, "screenshot");
+	assert.equal(observation.recommended_tool, "click_screenshot_point");
+	assert.equal(observation.verification_level, "visual");
+	assert.equal(observation.screenshots[0].id, "screenshot-0");
+	const result = await sky.click_screenshot_point({
+		window,
+		snapshot_id: observation.snapshot_id,
+		session_epoch: observation.session_epoch,
+		screenshot_id: "screenshot-0",
+		x: 123,
+		y: 447,
+		click_count: 1,
+		mouse_button: "left",
+		observe_after: true,
+	});
+	assert.equal(result.action.action_sent, "sent");
+	assert.equal(result.action.verification_mode, "screenshot");
+	assert.equal(result.observation.status, "ok");
+	assert.equal(result.observation.interaction_mode, "screenshot");
+	const click = calls.find(([method]) => method === "click")[1];
+	assert.equal(click.x, 123);
+	assert.equal(click.y, 447);
+	assert.equal(click.screenshotId, "screenshot-0");
+	const testText = "MCP 测试成功\n中文输入：你好，Windows！";
+	const typed = await sky.type_text_observed({
+		window,
+		snapshot_id: result.observation.snapshot_id,
+		session_epoch: result.observation.session_epoch,
+		text: testText,
+		observe_after: true,
+	});
+	assert.equal(typed.action.action_sent, "sent");
+	assert.equal(typed.action.verification_mode, "screenshot");
+	assert.equal(typed.action.characters, testText.length);
+	assert.equal(typed.observation.status, "ok");
+	assert.equal(calls.find(([method]) => method === "type")[1].text, testText);
+	await assert.rejects(
+		() => sky.click_screenshot_point({
+			window,
+			snapshot_id: typed.observation.snapshot_id,
+			session_epoch: typed.observation.session_epoch,
+			screenshot_id: "screenshot-0",
+			x: 323,
+			y: 534,
+			click_count: 1,
+			mouse_button: "left",
+			observe_after: false,
+		}),
+		/outside 323x534/,
+	);
+});
+
+test("rejects screenshot points from another or stale observation", async () => {
+	const {sky, helper, calls} = fixture();
+	helper.getWindowState = async input => ({
+		window: input.window,
+		screenshots: [{id: "screenshot-0", zIndex: 0, url: "data:image/png;base64,AA==", width: 100, height: 100}],
+		accessibility: null,
+	});
+	const first = await sky.observe_window({window, screenshot: true});
+	await sky.observe_window({window, screenshot: true});
+	for (const input of [
+		{window, snapshot_id: first.snapshot_id, session_epoch: first.session_epoch, screenshot_id: "screenshot-0", x: 1, y: 1},
+		{window, snapshot_id: (await sky.observe_window({window, screenshot: true})).snapshot_id, session_epoch: first.session_epoch, screenshot_id: "missing", x: 1, y: 1},
+	]) {
+		await assert.rejects(() => sky.click_screenshot_point({...input, click_count: 1, mouse_button: "left", observe_after: false}), isStale);
+	}
+	assert.equal(calls.some(([method]) => method === "click"), false);
+});
+
 test("reset invalidates actual snapshots through the worker and retains structured tools", async () => {
 	const {sky, calls} = fixture();
 	const kernel = new JsKernel({sky});
@@ -127,8 +207,9 @@ test("reset invalidates actual snapshots through the worker and retains structur
 
 test("generates tool schemas from the same validation contract", () => {
 	const definitions = desktopToolDefinitions();
-	assert.deepEqual(definitions.map(item => item.name), ["list_windows", "observe_window", "click_element", "set_value"]);
+	assert.deepEqual(definitions.map(item => item.name), ["list_windows", "observe_window", "click_element", "click_screenshot_point", "type_text_observed", "set_value"]);
 	assert.ok(definitions.find(item => item.name === "click_element").inputSchema.required.includes("snapshot_id"));
+	assert.ok(definitions.find(item => item.name === "click_screenshot_point").inputSchema.required.includes("screenshot_id"));
 	assert.throws(() => desktopToolCode("click_element", {window, element_index: 1}));
 	assert.throws(() => desktopToolCode("observe_window", {window, unknown: true}));
 });

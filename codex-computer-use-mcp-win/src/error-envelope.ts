@@ -20,6 +20,7 @@ const codes = new Set([
 const mutations = new Set([
 	"activate_window", "launch_app", "click", "click_element", "press_key",
 	"type_text", "scroll", "set_value", "drag", "perform_secondary_action", "set_value_observed",
+	"browser_open", "browser_new_tab", "browser_navigate",
 ]);
 const contexts = new WeakMap<Error, Partial<SerializableError>>();
 
