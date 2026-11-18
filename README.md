@@ -2,6 +2,15 @@
 
 这是已有 Windows Computer Use MCP 桥接器的独立宣传站，包含中英文、交互桌面示意、架构说明、三步接入、四种客户端配置、六条 FAQ，以及隐私说明、使用说明和 404。
 
+## 在线入口
+
+- 公开网站：https://computer-use-bridge-landing.vercel.app
+- 英文：https://computer-use-bridge-landing.vercel.app/?lang=en
+- GitHub：https://github.com/zhaokangwei095/computer-use-bridge-landing
+- Vercel 项目：https://vercel.com/zhaokangwei095s-projects/computer-use-bridge-landing
+
+部署与 Git 自动连接状态见 `docs/DEPLOYMENT.md`。
+
 ## 启动
 
 要求 Node.js 22 或更高版本。在本目录执行：
@@ -22,7 +31,7 @@ npm.cmd test        # 内容与配置逻辑测试
 npm.cmd audit       # 依赖检查
 ```
 
-发布时使用整个 `dist/` 目录，可由普通静态托管服务提供；本次没有部署到公网。部署在子路径时，应按目标托管服务调整 404 页的 base URL。正式域名尚未指定，因此没有伪造 canonical 或站点绝对 OG 地址；正式发布时请将 `og:image` 设置为最终域名下的 `/social-card.png` 完整地址。
+已部署到 Vercel。`vercel.json` 指定安装、构建命令、静态输出目录与安全响应头；无需服务端环境变量或数据库。构建时使用 Vercel 提供的生产域名生成绝对 OG 分享图地址；其他平台可设置 `SITE_URL`。在子路径托管时，应按目标服务调整 404 页的 base URL。
 
 ## 文件入口
 

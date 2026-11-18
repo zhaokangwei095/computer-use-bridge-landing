@@ -7,8 +7,9 @@ import path from 'node:path';
 const driver = process.env.PLAYWRIGHT_DRIVER;
 if (!driver) throw new Error('Set PLAYWRIGHT_DRIVER to an installed playwright-core/index.mjs.');
 const { chromium } = await import(pathToFileURL(driver).href);
+const networkOptions = process.env.PREVIEW_PROXY ? { proxy: { server: process.env.PREVIEW_PROXY } } : {};
 const browser = await chromium.launch({ headless: true, ...(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {}) });
-const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, reducedMotion: 'reduce', permissions: ['clipboard-read', 'clipboard-write'] });
+const context = await browser.newContext({ ...networkOptions, viewport: { width: 1440, height: 1000 }, reducedMotion: 'reduce', permissions: ['clipboard-read', 'clipboard-write'] });
 const page = await context.newPage();
 const errors = [];
 page.on('pageerror', error => errors.push(error.message));
@@ -99,7 +100,7 @@ try {
   assert.equal(reduce.transform, 'none');
   results.push({ faqKeyboardAndReducedMotion: 'passed' });
 
-  const failContext = await browser.newContext();
+  const failContext = await browser.newContext(networkOptions);
   await failContext.addInitScript(() => Object.defineProperty(navigator, 'clipboard', { value: { writeText: async () => { throw new Error('Denied'); } } }));
   const failPage = await failContext.newPage();
   await failPage.goto(base);
@@ -118,7 +119,7 @@ try {
   assert.ok(!linkTargets.includes('#'));
   for (const href of linkTargets.filter(value => value.startsWith('#'))) assert.ok(await page.locator(href).count(), `Missing anchor ${href}`);
   results.push({ notFoundAndInternalLinks: 'passed' });
-  const motionContext = await browser.newContext({ viewport: { width: 1440, height: 1000 }, reducedMotion: 'no-preference' });
+  const motionContext = await browser.newContext({ ...networkOptions, viewport: { width: 1440, height: 1000 }, reducedMotion: 'no-preference' });
   const motionPage = await motionContext.newPage();
   await motionPage.goto(base + '/?lang=en');
   await motionPage.locator('.tagline').scrollIntoViewIfNeeded();
