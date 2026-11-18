@@ -1,0 +1,9 @@
+.git
+**/.git
+.vercel
+**/node_modules
+**/dist
+**/artifacts
+**/.env*
+**/*.log
+codex-computer-use-mcp-win

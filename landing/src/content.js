@@ -1,4 +1,4 @@
-export const repository = 'https://github.com/zhaokangwei095/codex-computer-use-mcp-win';
+export const repository = 'https://github.com/zhaokangwei095/computer-use-bridge-landing';
 export const resolveLocale = (value) => value === 'en' ? 'en' : 'zh';
 
 export function configFor(client) {

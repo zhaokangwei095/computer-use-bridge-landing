@@ -1,6 +1,6 @@
 # Computer Use Bridge 落地页
 
-这是已有 Windows Computer Use MCP 桥接器的独立宣传站，包含中英文、交互桌面示意、架构说明、三步接入、四种客户端配置、六条 FAQ，以及隐私说明、使用说明和 404。
+这是完整 Computer Use Bridge 项目中的 `landing/` 宣传站，包含中英文、交互桌面示意、架构说明、三步接入、四种客户端配置、六条 FAQ，以及隐私说明、使用说明和 404。桥接器源码和测试位于仓库的 `codex-computer-use-mcp-win/`。
 
 ## 在线入口
 
@@ -31,7 +31,7 @@ npm.cmd test        # 内容与配置逻辑测试
 npm.cmd audit       # 依赖检查
 ```
 
-已部署到 Vercel。`vercel.json` 指定安装、构建命令、静态输出目录与安全响应头；无需服务端环境变量或数据库。构建时使用 Vercel 提供的生产域名生成绝对 OG 分享图地址；其他平台可设置 `SITE_URL`。在子路径托管时，应按目标服务调整 404 页的 base URL。
+已部署到 Vercel。完整仓库根目录的 `vercel.json` 只安装、构建 `landing/`，输出 `landing/dist/`；Windows MCP 服务在用户本机运行。`landing/vercel.json` 保留给独立部署本目录时使用。构建时使用 Vercel 提供的生产域名生成绝对 OG 分享图地址；其他平台可设置 `SITE_URL`。在子路径托管时，应按目标服务调整 404 页的 base URL。
 
 ## 文件入口
 

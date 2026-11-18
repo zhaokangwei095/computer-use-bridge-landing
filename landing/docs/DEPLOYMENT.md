@@ -4,19 +4,21 @@
 
 ## 已发布
 
+本仓库现已扩展为完整项目：`codex-computer-use-mcp-win/` 包含桥接器源码与测试，`landing/` 包含网站。根 `vercel.json` 从完整仓库中只构建 `landing/`。Vercel 不执行本机 Windows 服务。
+
 - GitHub：`https://github.com/zhaokangwei095/computer-use-bridge-landing`，公开仓库，默认分支 `main`。
 - Vercel 项目：`computer-use-bridge-landing`，位于 `zhaokangwei095s-projects`。
 - 网站：`https://computer-use-bridge-landing.vercel.app`。
 - 首次部署：`dpl_6jjNGhV4GLHYpskYacVTdYeKonaA`，Vercel 状态 `READY`。
 - 首次部署由 Vercel 为新项目自动指定为 production，不覆盖既有项目。
-- 安装：`npm ci --ignore-scripts`；构建：`npm run build`；输出：`dist`。
+- 从完整仓库根目录安装：`npm ci --prefix landing --ignore-scripts`；构建：`npm --prefix landing run build`；输出：`landing/dist`。
 - 部署不需要额外的服务端密钥。`.env*`、`.vercel/`、本机截图与日志不进入 Git 或部署上传。
 
 ## 自动部署连接
 
 GitHub 仓库和 Vercel 站点分别已发布。尝试连接 Git 集成时，Vercel 返回需要安装 GitHub App。浏览器已将授权范围限制为本次的一个仓库 `computer-use-bridge-landing`，但 GitHub 要求本人完成 Confirm access 验证，所以 App 安装与自动部署连接尚未完成。
 
-完成本人验证并安装 App 后，在本目录执行：
+完成本人验证并安装 App 后，在完整仓库根目录执行：
 
 ```powershell
 vercel.cmd git connect https://github.com/zhaokangwei095/computer-use-bridge-landing.git --yes --scope zhaokangwei095s-projects

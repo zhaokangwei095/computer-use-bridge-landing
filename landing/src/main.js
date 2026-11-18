@@ -79,7 +79,7 @@ function home(t) {
     <section class="tagline-section"><div class="wrap"><p class="eyebrow caption-3">THINK HERE. ACT THERE.</p><p class="tagline heading-1" aria-label="${t.tagline1} ${t.tagline2}"><span class="tagline-word">${t.tagline1}</span><br><span class="tagline-word">${t.tagline2}</span></p><p class="body-3 muted">${t.taglineFoot}</p><span class="tagline-glyph" aria-hidden="true">${icon('arrow-elbow-down-right')}</span></div></section>
     <section class="workflow-section wrap" id="workflow" aria-labelledby="workflow-title"><div class="workflow-heading reveal"><div><p class="eyebrow caption-3">${t.workflowEyebrow}</p><h2 class="heading-2" id="workflow-title">${br(t.workflowTitle)}</h2></div><p class="body-3 muted">${t.workflowBody}</p></div><div class="flow-diagram reveal">${[['brain', t.flowAgent, t.flowAgentSub], ['code', t.flowBridge, t.flowBridgeSub], ['desktop', t.flowRuntime, t.flowRuntimeSub]].map(([glyph, title, sub], i) => `${i ? `<span class="flow-arrow" aria-hidden="true">${icon('arrow-right')}</span>` : ''}<div class="flow-node ${i === 1 ? 'flow-node-accent' : ''}">${icon(glyph)}<h3 class="title-2">${title}</h3><p class="caption-2">${sub}</p></div>`).join('')}</div><p class="workflow-foot caption-2 muted">${icon('shield-check')}${t.flowNote}</p></section>
     ${install(t)}
-    <aside class="boundary wrap" id="boundary"><div class="boundary-icon">${icon('warning-circle')}</div><div><h2 class="title-2">${t.boundaryTitle}</h2><p class="body-6">${t.boundary}</p><a class="text-link title-4" href="${repository}#tools" target="_blank" rel="noopener noreferrer">${t.boundaryLink}${arrow()}</a></div></aside>
+    <aside class="boundary wrap" id="boundary"><div class="boundary-icon">${icon('warning-circle')}</div><div><h2 class="title-2">${t.boundaryTitle}</h2><p class="body-6">${t.boundary}</p><a class="text-link title-4" href="${repository}/tree/main/codex-computer-use-mcp-win#tools" target="_blank" rel="noopener noreferrer">${t.boundaryLink}${arrow()}</a></div></aside>
     <section class="faq-section wrap" id="faq" aria-labelledby="faq-title"><div class="section-heading"><p class="eyebrow caption-3">${t.faqEyebrow}</p><h2 class="heading-3" id="faq-title">${t.faqTitle}</h2></div><div class="faq-list">${t.faq.map(([q, a]) => `<details><summary class="title-3">${q}${icon('plus')}</summary><p class="body-6 muted">${a}</p></details>`).join('')}</div></section>
     <section class="final-section"><div class="wrap"><span class="brand-mark large-mark" aria-hidden="true">${icon('code')}</span><h2 class="heading-2">${br(t.finalTitle)}</h2><p class="body-3 muted">${t.finalBody}</p>${primary(t)}</div></section>
   </main>${footer(t)}`;
@@ -113,7 +113,7 @@ function render() {
   bindMenu();
   if (isHome) {
     setConfig();
-    document.querySelector('#build-code').textContent = `git clone ${repository}.git\ncd codex-computer-use-mcp-win\nnpm ci\nnpm run build\nnode dist\\mcp-server.js --status`;
+    document.querySelector('#build-code').textContent = `git clone ${repository}.git\ncd computer-use-bridge-landing\\codex-computer-use-mcp-win\nnpm ci\nnpm run build\nnode dist\\mcp-server.js --status`;
     document.querySelectorAll('[data-stage-button]').forEach(button => button.addEventListener('click', () => setStage(Number(button.dataset.stageButton))));
     document.querySelector('#client-select').value = client;
     document.querySelector('#client-select').addEventListener('change', event => { client = event.target.value; setConfig(); });
